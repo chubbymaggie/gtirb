@@ -19,79 +19,110 @@
 #include <map>
 
 namespace gtirb {
-CFG::edge_descriptor addEdge(const Block* From, const Block* To, CFG& Cfg) {
-  return add_edge(From->getVertex(), To->getVertex(), Cfg).first;
-} // namespace gtirb
+CFG::vertex_descriptor addVertex(CfgNode* N, CFG& Cfg) {
+  auto& IdTable = Cfg[boost::graph_bundle];
+  if (auto it = IdTable.find(N); it != IdTable.end())
+    return it->second;
+
+  auto Vertex = add_vertex(Cfg);
+  Cfg[Vertex] = N;
+  IdTable[N] = Vertex;
+  return Vertex;
+}
+
+std::optional<CFG::vertex_descriptor> getVertex(const CfgNode* N,
+                                                const CFG& Cfg) {
+  auto& IdTable = Cfg[boost::graph_bundle];
+  if (auto it = IdTable.find(N); it != IdTable.end())
+    return it->second;
+  return std::nullopt;
+}
+
+std::optional<CFG::edge_descriptor> addEdge(const CfgNode* From,
+                                            const CfgNode* To, CFG& Cfg) {
+  const auto& IdTable = Cfg[boost::graph_bundle];
+  if (auto it = IdTable.find(From); it != IdTable.end()) {
+    auto FromVertex = it->second;
+    if (it = IdTable.find(To); it != IdTable.end()) {
+      auto ToVertex = it->second;
+      return add_edge(FromVertex, ToVertex, Cfg).first;
+    }
+  }
+  return std::nullopt;
+}
+
+boost::iterator_range<const_cfg_iterator> nodes(const CFG& Cfg) {
+  auto Vs = vertices(Cfg);
+  return boost::make_iterator_range(
+      const_cfg_iterator(cfg_node_iter_base(Cfg, Vs.first)),
+      const_cfg_iterator(cfg_node_iter_base(Cfg, Vs.second)));
+}
+
+boost::iterator_range<cfg_iterator> nodes(CFG& Cfg) {
+  auto Vs = vertices(Cfg);
+  return boost::make_iterator_range(
+      cfg_iterator(cfg_node_iter_base(Cfg, Vs.first)),
+      cfg_iterator(cfg_node_iter_base(Cfg, Vs.second)));
+}
 
 boost::iterator_range<const_block_iterator> blocks(const CFG& Cfg) {
   auto Vs = vertices(Cfg);
-  return boost::iterator_range<const_block_iterator>(
-      std::make_pair(const_block_iterator(Vs.first, Cfg),
-                     const_block_iterator(Vs.second, Cfg)));
+  return boost::make_iterator_range(
+      const_block_iterator(Cfg, Vs.first, Vs.second),
+      const_block_iterator(Cfg, Vs.second, Vs.second));
 }
 
 boost::iterator_range<block_iterator> blocks(CFG& Cfg) {
   auto Vs = vertices(Cfg);
-  return boost::iterator_range<block_iterator>(std::make_pair(
-      block_iterator(Vs.first, Cfg), block_iterator(Vs.second, Cfg)));
+  return boost::make_iterator_range(block_iterator(Cfg, Vs.first, Vs.second),
+                                    block_iterator(Cfg, Vs.second, Vs.second));
 }
 
 proto::CFG toProtobuf(const CFG& Cfg) {
   proto::CFG Message;
-  containerToProtobuf(blocks(Cfg), Message.mutable_blocks());
-  auto MessageEdges = Message.mutable_edges();
-  auto EdgeRange = edges(Cfg);
-  std::for_each(
-      EdgeRange.first, EdgeRange.second, [MessageEdges, &Cfg](const auto& E) {
-        auto M = MessageEdges->Add();
-        nodeUUIDToBytes(Cfg[source(E, Cfg)], *M->mutable_source_uuid());
-        nodeUUIDToBytes(Cfg[target(E, Cfg)], *M->mutable_target_uuid());
-        auto Label = Cfg[E];
-        switch (Label.index()) {
-        case 1:
-          M->set_boolean(std::get<bool>(Label));
-          break;
-        case 2:
-          M->set_integer(std::get<uint64_t>(Label));
-          break;
-        case 0:
-        default:
-          // Blank, nothing to do
-          break;
-        }
-      });
+  auto MessageVertices = Message.mutable_vertices();
+  for (const Node& N : nodes(Cfg)) {
+    auto* M = MessageVertices->Add();
+    nodeUUIDToBytes(&N, *M);
+  }
 
+  auto MessageEdges = Message.mutable_edges();
+  for (const auto& E : boost::make_iterator_range(edges(Cfg))) {
+    auto M = MessageEdges->Add();
+    nodeUUIDToBytes(Cfg[source(E, Cfg)], *M->mutable_source_uuid());
+    nodeUUIDToBytes(Cfg[target(E, Cfg)], *M->mutable_target_uuid());
+    if (auto Label = Cfg[E]) {
+      auto* L = M->mutable_label();
+      L->set_conditional(std::get<ConditionalEdge>(*Label) ==
+                         ConditionalEdge::OnTrue);
+      L->set_direct(std::get<DirectEdge>(*Label) == DirectEdge::IsDirect);
+      L->set_type(static_cast<proto::EdgeType>(std::get<EdgeType>(*Label)));
+    }
+  }
   return Message;
 }
 
 void fromProtobuf(Context& C, CFG& Result, const proto::CFG& Message) {
-  std::for_each(Message.blocks().begin(), Message.blocks().end(),
-                [&Result, &C](const auto& M) {
-                  auto* B =
-                      emplaceBlock(Result, C, Addr(M.address()), M.size(),
-                                   Block::Exit(M.exit_kind()), M.decode_mode());
-                  setNodeUUIDFromBytes(B, M.uuid());
-                });
-  std::for_each(Message.edges().begin(), Message.edges().end(),
-                [&Result, &C](const auto& M) {
-                  auto* Source = dyn_cast_or_null<Block>(
-                      Node::getByUUID(C, uuidFromBytes(M.source_uuid())));
-                  auto* Target = dyn_cast_or_null<Block>(
-                      Node::getByUUID(C, uuidFromBytes(M.target_uuid())));
-
-                  if (Source && Target) {
-                    auto E = addEdge(Source, Target, Result);
-                    switch (M.label_case()) {
-                    case proto::Edge::kBoolean:
-                      Result[E] = M.boolean();
-                      break;
-                    case proto::Edge::kInteger:
-                      Result[E] = M.integer();
-                    case proto::Edge::LABEL_NOT_SET:
-                      // Nothing to do. Default edge label is blank.
-                      break;
-                    }
-                  }
-                });
+  for (const auto& M : Message.vertices()) {
+    CfgNode* N =
+        dyn_cast_or_null<CfgNode>(Node::getByUUID(C, uuidFromBytes(M)));
+    addVertex(N, Result);
+  }
+  for (const auto& M : Message.edges()) {
+    auto* Source = dyn_cast_or_null<CfgNode>(
+        Node::getByUUID(C, uuidFromBytes(M.source_uuid())));
+    auto* Target = dyn_cast_or_null<CfgNode>(
+        Node::getByUUID(C, uuidFromBytes(M.target_uuid())));
+    if (Source && Target) {
+      if (auto E = addEdge(Source, Target, Result); E && M.has_label()) {
+        auto& L = M.label();
+        Result[*E] = std::make_tuple(L.conditional() ? ConditionalEdge::OnTrue
+                                                     : ConditionalEdge::OnFalse,
+                                     L.direct() ? DirectEdge::IsDirect
+                                                : DirectEdge::IsIndirect,
+                                     static_cast<EdgeType>(L.type()));
+      }
+    }
+  }
 }
 } // namespace gtirb

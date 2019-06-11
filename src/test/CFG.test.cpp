@@ -15,36 +15,112 @@
 #include <gtirb/Block.hpp>
 #include <gtirb/CFG.hpp>
 #include <gtirb/Context.hpp>
+#include <gtirb/ProxyBlock.hpp>
 #include <proto/CFG.pb.h>
 #include <gtest/gtest.h>
 
-//
-#include <boost/uuid/uuid_io.hpp>
-//
-
 using namespace gtirb;
+
+TEST(Unit_CFG, compilationIteratorTypes) {
+  static_assert(std::is_same_v<cfg_iterator::reference, CfgNode&>);
+  static_assert(std::is_same_v<const_cfg_iterator::reference, const CfgNode&>);
+  {
+    cfg_iterator it;
+    const_cfg_iterator cit(it);
+    cit = it;
+  }
+
+  static_assert(std::is_same_v<block_iterator::reference, Block&>);
+  static_assert(std::is_same_v<const_block_iterator::reference, const Block&>);
+  {
+    block_iterator it;
+    const_block_iterator cit(it);
+    cit = it;
+  }
+}
 
 static Context Ctx;
 
 TEST(Unit_CFG, addVertex) {
-  //  CFG Cfg;
-  //  auto Descriptor = add_vertex(Cfg);
-  //  EXPECT_EQ(Cfg[Descriptor]->getAddress(), Addr());
-  //  EXPECT_EQ(Cfg[Descriptor]->getSize(), 0);
+  CFG Cfg;
+  auto* B = Block::Create(Ctx, Addr(1), 2);
+  auto Descriptor1 = addVertex(B, Cfg);
+  EXPECT_EQ(Cfg[Descriptor1], B);
+  EXPECT_EQ(dyn_cast<Block>(Cfg[Descriptor1])->getAddress(), Addr(1));
+  EXPECT_EQ(dyn_cast<Block>(Cfg[Descriptor1])->getSize(), 2);
+
+  // adding the same block again doesn't change the graph
+  auto Descriptor2 = addVertex(B, Cfg);
+  EXPECT_EQ(Descriptor2, Descriptor1);
+  auto Vertices = vertices(Cfg);
+  EXPECT_EQ(std::distance(Vertices.first, Vertices.second), 1);
+
+  auto* P = ProxyBlock::Create(Ctx);
+  auto Descriptor3 = addVertex(P, Cfg);
+  EXPECT_EQ(Cfg[Descriptor3], P);
+  auto Descriptor4 = addVertex(P, Cfg);
+  EXPECT_EQ(Descriptor4, Descriptor3);
+  Vertices = vertices(Cfg);
+  EXPECT_EQ(std::distance(Vertices.first, Vertices.second), 2);
 }
 
-TEST(Unit_CFG, addBlock) {
+TEST(Unit_CFG, getVertex) {
   CFG Cfg;
-  auto B = emplaceBlock(Cfg, Ctx, Addr(1), 2);
-  EXPECT_EQ(Cfg[B->getVertex()]->getAddress(), Addr(1));
-  EXPECT_EQ(Cfg[B->getVertex()]->getSize(), 2);
+  auto* B = Block::Create(Ctx, Addr(1), 2);
+  auto* P = ProxyBlock::Create(Ctx);
+  auto DescriptorB = addVertex(B, Cfg);
+  auto DescriptorP = addVertex(P, Cfg);
+  EXPECT_EQ(getVertex(B, Cfg), DescriptorB);
+  EXPECT_EQ(getVertex(P, Cfg), DescriptorP);
+}
+
+TEST(Unit_CFG, cfgIterator) {
+  CFG Cfg;
+  auto* B1 = Block::Create(Ctx, Addr(1), 2);
+  auto* P1 = ProxyBlock::Create(Ctx);
+  auto* B2 = Block::Create(Ctx, Addr(3), 2);
+  auto* P2 = ProxyBlock::Create(Ctx);
+  addVertex(B1, Cfg);
+  addVertex(P1, Cfg);
+  addVertex(B2, Cfg);
+  addVertex(P2, Cfg);
+
+  // Non-const graph produces a regular iterator
+  boost::iterator_range<cfg_iterator> NodeRange = nodes(Cfg);
+  EXPECT_EQ(std::distance(NodeRange.begin(), NodeRange.end()), 4);
+  auto It = NodeRange.begin();
+  EXPECT_EQ(&*It, B1);
+  ++It;
+  EXPECT_EQ(&*It, P1);
+  ++It;
+  EXPECT_EQ(&*It, B2);
+  ++It;
+  EXPECT_EQ(&*It, P2);
+  ++It;
+  EXPECT_EQ(It, NodeRange.end());
+
+  // Const graph produces a const iterator
+  const CFG& ConstCfg = Cfg;
+  boost::iterator_range<const_cfg_iterator> ConstRange = nodes(ConstCfg);
+  EXPECT_EQ(std::distance(ConstRange.begin(), ConstRange.end()), 4);
+  auto Cit = ConstRange.begin();
+  EXPECT_EQ(&*Cit, B1);
+  ++Cit;
+  EXPECT_EQ(&*Cit, P1);
+  ++Cit;
+  EXPECT_EQ(&*Cit, B2);
+  ++Cit;
+  EXPECT_EQ(&*Cit, P2);
+  ++Cit;
+  EXPECT_EQ(Cit, ConstRange.end());
 }
 
 TEST(Unit_CFG, blockIterator) {
   CFG Cfg;
-  emplaceBlock(Cfg, Ctx, Addr(1), 2);
-  emplaceBlock(Cfg, Ctx, Addr(3), 2);
-  emplaceBlock(Cfg, Ctx, Addr(5), 2);
+  addVertex(Block::Create(Ctx, Addr(1), 2), Cfg);
+  addVertex(Block::Create(Ctx, Addr(3), 2), Cfg);
+  addVertex(Block::Create(Ctx, Addr(5), 2), Cfg);
+  addVertex(ProxyBlock::Create(Ctx), Cfg);
 
   // Non-const graph produces a regular iterator
   boost::iterator_range<block_iterator> BlockRange = blocks(Cfg);
@@ -74,113 +150,141 @@ TEST(Unit_CFG, blockIterator) {
 
 TEST(Unit_CFG, edges) {
   CFG Cfg;
-  auto B1 = emplaceBlock(Cfg, Ctx, Addr(1), 2);
-  auto B2 = emplaceBlock(Cfg, Ctx, Addr(3), 4);
-  auto B3 = emplaceBlock(Cfg, Ctx, Addr(5), 6);
+  auto B1 = Block::Create(Ctx, Addr(1), 2);
+  auto B2 = Block::Create(Ctx, Addr(3), 4);
+  auto P1 = ProxyBlock::Create(Ctx);
+  addVertex(B1, Cfg);
+  addVertex(B2, Cfg);
+  addVertex(P1, Cfg);
 
-  auto E1 = addEdge(B1, B3, Cfg);
-  EXPECT_EQ(Cfg[source(E1, Cfg)], B1);
-  EXPECT_EQ(Cfg[target(E1, Cfg)], B3);
+  auto E1 = addEdge(B1, P1, Cfg);
+  EXPECT_EQ(Cfg[source(*E1, Cfg)], B1);
+  EXPECT_EQ(Cfg[target(*E1, Cfg)], P1);
 
-  auto E2 = addEdge(B2, B3, Cfg);
-  EXPECT_EQ(Cfg[source(E2, Cfg)], B2);
-  EXPECT_EQ(Cfg[target(E2, Cfg)], B3);
+  auto E2 = addEdge(B2, P1, Cfg);
+  EXPECT_EQ(Cfg[source(*E2, Cfg)], B2);
+  EXPECT_EQ(Cfg[target(*E2, Cfg)], P1);
 
-  auto E3 = addEdge(B3, B1, Cfg);
-  EXPECT_EQ(Cfg[source(E3, Cfg)], B3);
-  EXPECT_EQ(Cfg[target(E3, Cfg)], B1);
+  auto E3 = addEdge(P1, B1, Cfg);
+  EXPECT_EQ(Cfg[source(*E3, Cfg)], P1);
+  EXPECT_EQ(Cfg[target(*E3, Cfg)], B1);
 
   // Parallel edge
-  auto E4 = addEdge(B1, B3, Cfg);
-  EXPECT_EQ(Cfg[source(E4, Cfg)], B1);
-  EXPECT_EQ(Cfg[target(E4, Cfg)], B3);
+  auto E4 = addEdge(B1, P1, Cfg);
+  EXPECT_EQ(Cfg[source(*E4, Cfg)], B1);
+  EXPECT_EQ(Cfg[target(*E4, Cfg)], P1);
 }
 
 TEST(Unit_CFG, edgeLabels) {
   CFG Cfg;
-  auto B1 = emplaceBlock(Cfg, Ctx, Addr(1), 2);
-  auto B2 = emplaceBlock(Cfg, Ctx, Addr(3), 4);
+  auto B1 = Block::Create(Ctx, Addr(1), 2);
+  auto B2 = Block::Create(Ctx, Addr(3), 4);
+  addVertex(B1, Cfg);
+  addVertex(B2, Cfg);
 
-  // boolean label
-  auto E1 = addEdge(B1, B2, Cfg);
-  Cfg[E1] = true;
-  EXPECT_EQ(std::get<bool>(Cfg[E1]), true);
+  // Create an edge with no label
+  auto E = addEdge(B2, B1, Cfg);
+  EXPECT_FALSE(Cfg[*E]);
 
-  // numeric label
-  auto E2 = addEdge(B1, B2, Cfg);
-  Cfg[E2] = uint64_t(5);
-  EXPECT_EQ(std::get<uint64_t>(Cfg[E2]), 5);
+  auto Conds = {ConditionalEdge::OnFalse, ConditionalEdge::OnTrue};
+  auto Dirs = {DirectEdge::IsDirect, DirectEdge::IsIndirect};
+  auto Types = {EdgeType::Branch, EdgeType::Call,    EdgeType::Fallthrough,
+                EdgeType::Return, EdgeType::Syscall, EdgeType::Sysret};
 
-  // parallel edge with different label
-  auto E3 = addEdge(B1, B2, Cfg);
-  Cfg[E3] = true;
-  EXPECT_EQ(std::get<bool>(Cfg[E3]), true);
-  EXPECT_EQ(std::get<uint64_t>(Cfg[E2]), 5);
+  // Create a number of parallel edges with different labels.
+  std::vector<CFG::edge_descriptor> Descriptors;
+  for (ConditionalEdge Cond : Conds) {
+    for (DirectEdge Dir : Dirs) {
+      for (EdgeType Type : Types) {
+        E = addEdge(B1, B2, Cfg);
+        Cfg[*E] = std::make_tuple(Cond, Dir, Type);
+        Descriptors.push_back(*E);
+      }
+    }
+  }
+
+  // Check that the edges have the properties we assigned.
+  auto It = Descriptors.begin();
+  for (ConditionalEdge Cond : Conds) {
+    for (DirectEdge Dir : Dirs) {
+      for (EdgeType Type : Types) {
+        EXPECT_TRUE(Cfg[*It]);
+        EXPECT_EQ(std::get<ConditionalEdge>(*Cfg[*It]), Cond);
+        EXPECT_EQ(std::get<DirectEdge>(*Cfg[*It]), Dir);
+        EXPECT_EQ(std::get<EdgeType>(*Cfg[*It]), Type);
+        ++It;
+      }
+    }
+  }
 }
 
 TEST(Unit_CFG, protobufRoundTrip) {
   CFG Result;
   proto::CFG Message;
-  UUID Id1, Id2, Id3;
 
+  auto B1 = Block::Create(Ctx, Addr(1), 2, 3);
+  auto B2 = Block::Create(Ctx, Addr(4), 5, 6);
+  auto P1 = ProxyBlock::Create(Ctx);
   {
-    Context InnerCtx;
     CFG Original;
-    auto B1 =
-        emplaceBlock(Original, InnerCtx, Addr(1), 2, Block::Exit::Branch, 3);
-    auto B2 =
-        emplaceBlock(Original, InnerCtx, Addr(4), 5, Block::Exit::Call, 6);
-    auto B3 =
-        emplaceBlock(Original, InnerCtx, Addr(7), 8, Block::Exit::Return, 9);
+    addVertex(B1, Original);
+    addVertex(B2, Original);
+    addVertex(P1, Original);
 
-    auto E1 = addEdge(B1, B3, Original);
-    auto E2 = addEdge(B2, B3, Original);
-    addEdge(B3, B1, Original);
-    Original[E1] = true;
-    Original[E2] = uint64_t(5);
-
-    Id1 = Original[B1->getVertex()]->getUUID();
-    Id2 = Original[B2->getVertex()]->getUUID();
-    Id3 = Original[B3->getVertex()]->getUUID();
+    auto E1 = addEdge(B1, P1, Original);
+    auto E2 = addEdge(B2, P1, Original);
+    addEdge(P1, B1, Original);
+    Original[*E1] = std::make_tuple(ConditionalEdge::OnTrue,
+                                    DirectEdge::IsDirect, EdgeType::Branch);
+    Original[*E2] = std::make_tuple(ConditionalEdge::OnFalse,
+                                    DirectEdge::IsIndirect, EdgeType::Call);
 
     Message = toProtobuf(Original);
   }
   fromProtobuf(Ctx, Result, Message);
 
-  EXPECT_EQ(blocks(Result).size(), 3);
-  auto It = blocks(Result).begin();
-  EXPECT_EQ(It->getUUID(), Id1);
-  EXPECT_EQ(It->getAddress(), Addr(1));
-  EXPECT_EQ(It->getSize(), 2);
-  EXPECT_EQ(It->getDecodeMode(), 3);
-  EXPECT_EQ(It->getExitKind(), Block::Exit::Branch);
+  auto Range = nodes(Result);
+  EXPECT_EQ(std::distance(Range.begin(), Range.end()), 3);
+  auto It = Range.begin();
+  EXPECT_EQ(It->getUUID(), B1->getUUID());
+  EXPECT_EQ(dyn_cast<Block>(&*It)->getAddress(), Addr(1));
+  EXPECT_EQ(dyn_cast<Block>(&*It)->getSize(), 2);
+  EXPECT_EQ(dyn_cast<Block>(&*It)->getDecodeMode(), 3);
   ++It;
-  EXPECT_EQ(It->getUUID(), Id2);
-  EXPECT_EQ(It->getAddress(), Addr(4));
-  EXPECT_EQ(It->getSize(), 5);
-  EXPECT_EQ(It->getDecodeMode(), 6);
-  EXPECT_EQ(It->getExitKind(), Block::Exit::Call);
+  EXPECT_EQ(It->getUUID(), B2->getUUID());
+  EXPECT_EQ(dyn_cast<Block>(&*It)->getAddress(), Addr(4));
+  EXPECT_EQ(dyn_cast<Block>(&*It)->getSize(), 5);
+  EXPECT_EQ(dyn_cast<Block>(&*It)->getDecodeMode(), 6);
   ++It;
-  EXPECT_EQ(It->getUUID(), Id3);
-  EXPECT_EQ(It->getAddress(), Addr(7));
-  EXPECT_EQ(It->getSize(), 8);
-  EXPECT_EQ(It->getDecodeMode(), 9);
-  EXPECT_EQ(It->getExitKind(), Block::Exit::Return);
+  EXPECT_EQ(It->getUUID(), P1->getUUID());
 
   // Check edges
-  EXPECT_TRUE(edge(vertex(0, Result), vertex(2, Result), Result).second);
-  EXPECT_TRUE(edge(vertex(1, Result), vertex(2, Result), Result).second);
-  EXPECT_TRUE(edge(vertex(2, Result), vertex(0, Result), Result).second);
+  EXPECT_TRUE(
+      edge(*getVertex(B1, Result), *getVertex(P1, Result), Result).second);
+  EXPECT_TRUE(
+      edge(*getVertex(B2, Result), *getVertex(P1, Result), Result).second);
+  EXPECT_TRUE(
+      edge(*getVertex(P1, Result), *getVertex(B1, Result), Result).second);
 
   // Check nonexistent edges
-  EXPECT_FALSE(edge(vertex(0, Result), vertex(1, Result), Result).second);
-  EXPECT_FALSE(edge(vertex(1, Result), vertex(0, Result), Result).second);
-  EXPECT_FALSE(edge(vertex(2, Result), vertex(1, Result), Result).second);
+  EXPECT_FALSE(
+      edge(*getVertex(B1, Result), *getVertex(B2, Result), Result).second);
+  EXPECT_FALSE(
+      edge(*getVertex(B2, Result), *getVertex(B1, Result), Result).second);
+  EXPECT_FALSE(
+      edge(*getVertex(P1, Result), *getVertex(B2, Result), Result).second);
 
   // Check labels
-  auto E1 = edge(vertex(0, Result), vertex(2, Result), Result).first;
-  EXPECT_EQ(std::get<bool>(Result[E1]), true);
+  auto E1 = edge(*getVertex(B1, Result), *getVertex(P1, Result), Result).first;
+  EXPECT_EQ(std::get<ConditionalEdge>(*Result[E1]), ConditionalEdge::OnTrue);
+  EXPECT_EQ(std::get<DirectEdge>(*Result[E1]), DirectEdge::IsDirect);
+  EXPECT_EQ(std::get<EdgeType>(*Result[E1]), EdgeType::Branch);
 
-  auto E2 = edge(vertex(1, Result), vertex(2, Result), Result).first;
-  EXPECT_EQ(std::get<uint64_t>(Result[E2]), 5);
+  auto E2 = edge(*getVertex(B2, Result), *getVertex(P1, Result), Result).first;
+  EXPECT_EQ(std::get<ConditionalEdge>(*Result[E2]), ConditionalEdge::OnFalse);
+  EXPECT_EQ(std::get<DirectEdge>(*Result[E2]), DirectEdge::IsIndirect);
+  EXPECT_EQ(std::get<EdgeType>(*Result[E2]), EdgeType::Call);
+
+  auto E3 = edge(*getVertex(P1, Result), *getVertex(B1, Result), Result).first;
+  EXPECT_FALSE(Result[E3]);
 }

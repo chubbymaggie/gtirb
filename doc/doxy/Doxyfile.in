@@ -32,13 +32,13 @@ DOXYFILE_ENCODING      = UTF-8
 # title of most generated pages and in a few other places.
 # The default value is: My Project.
 
-PROJECT_NAME           = GT-IRB
+PROJECT_NAME           = GTIRB
 
 # The PROJECT_NUMBER tag can be used to enter a project or revision number. This
 # could be handy for archiving the generated documentation or if some version
 # control system is used.
 
-PROJECT_NUMBER         = v0.0
+PROJECT_NUMBER         = v@GTIRB_MAJOR_VERSION@.@GTIRB_MINOR_VERSION@.@GTIRB_PATCH_VERSION@
 
 # Using the PROJECT_BRIEF tag one can provide an optional one line description
 # for a project that appears at the top of each page and should give viewer a
@@ -785,7 +785,7 @@ WARN_LOGFILE           = doxygen_warnings.txt
 # TOC (otherwise it will be alphabetical)
 
 INPUT   = @CMAKE_CURRENT_SOURCE_DIR@/../../include @CMAKE_CURRENT_SOURCE_DIR@/../dot
-INPUT   += README.md CFG-Edges.md CONTRIBUTING.md 
+INPUT   += README.md FAQ.md PROTOBUF.md CFG-Edges.md AuxData.md CONTRIBUTING.md 
 
 # This tag can be used to specify the character encoding of the source files
 # that doxygen parses. Internally doxygen uses the UTF-8 encoding. Doxygen uses
@@ -900,7 +900,7 @@ EXCLUDE_SYMBOLS        = proto
 # that contain example code fragments that are included (see the \include
 # command).
 
-EXAMPLE_PATH           = ../doc/examples
+EXAMPLE_PATH           = @CMAKE_CURRENT_SOURCE_DIR@/../examples
 
 # If the value of the EXAMPLE_PATH tag contains directories, you can use the
 # EXAMPLE_PATTERNS tag to specify one or more wildcard pattern (like *.cpp and

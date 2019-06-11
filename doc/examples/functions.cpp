@@ -4,6 +4,7 @@
 #include <gtirb/gtirb.hpp>
 #include <fstream>
 #include <iomanip>
+#include <iostream>
 #include <map>
 
 using namespace gtirb;
@@ -31,7 +32,7 @@ int main(int argc, char** argv) {
 
   // Build a map of basic blocks by address
   std::map<Addr, const Block*> BlocksByAddr;
-  auto Blocks = blocks(I->modules()[0].getCFG());
+  auto Blocks = blocks(I->begin()->getCFG());
   std::for_each(Blocks.begin(), Blocks.end(), [&BlocksByAddr](const auto& B) {
     BlocksByAddr.emplace(B.getAddress(), &B);
   });
@@ -54,9 +55,7 @@ int main(int argc, char** argv) {
     int CallCount = 0;
     for (auto It = BlocksByAddr.find(Address); It != End && It->first < EndAddr;
          It++) {
-      if (It->second->getExitKind() == Block::Exit::Call) {
-        CallCount++;
-      }
+      // FIXME: implement in terms of edge labels once those are available
     }
     std::cout << ", contains " << CallCount << " calls\n";
   }

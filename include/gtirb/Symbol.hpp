@@ -19,10 +19,12 @@
 #include <gtirb/Block.hpp>
 #include <gtirb/DataObject.hpp>
 #include <gtirb/Node.hpp>
+#include <gtirb/ProxyBlock.hpp>
 #include <proto/Symbol.pb.h>
 #include <functional>
 #include <optional>
 #include <type_traits>
+#include <variant>
 
 /// \file Symbol.hpp
 /// \brief Class gtirb::Symbol.
@@ -41,9 +43,11 @@ class GTIRB_EXPORT_API Symbol : public Node {
     static_assert(std::is_invocable_v<Callable, Ty*>,
                   "Visitor must contain an overloaded function call operator "
                   "for each of the types in supported_types");
-    if (Ty* Obj = dyn_cast_or_null<Ty>(this->Referent)) {
-      std::invoke(Visitor, Obj);
-      return true;
+    if (Node* const* Ptr = std::get_if<Node*>(&Payload)) {
+      if (Ty* Obj = dyn_cast_or_null<Ty>(*Ptr)) {
+        std::invoke(Visitor, Obj);
+        return true;
+      }
     }
     return false;
   }
@@ -57,9 +61,11 @@ class GTIRB_EXPORT_API Symbol : public Node {
     static_assert(std::is_invocable_v<Callable, Ty*>,
                   "Visitor must contain an overloaded function call operator "
                   "for each of the types in supported_types");
-    if (Ty* Obj = dyn_cast_or_null<Ty>(this->Referent)) {
-      Ret = std::invoke(Visitor, Obj);
-      return true;
+    if (Node* const* Ptr = std::get_if<Node*>(&Payload)) {
+      if (Ty* Obj = dyn_cast_or_null<Ty>(*Ptr)) {
+        Ret = std::invoke(Visitor, Obj);
+        return true;
+      }
     }
     return false;
   }
@@ -151,6 +157,7 @@ class GTIRB_EXPORT_API Symbol : public Node {
     return (... || std::is_same_v<NodeTy, Types>);
   }
 
+public:
   // Helper function that determines whether the passed NodeTy is one of the
   // supported referent types.
   template <typename NodeTy> static constexpr bool is_supported_type() {
@@ -158,9 +165,8 @@ class GTIRB_EXPORT_API Symbol : public Node {
         std::decay_t<supported_referent_types>{});
   }
 
-public:
   /// \brief The list of supported referent types.
-  using supported_referent_types = TypeList<Block, DataObject>;
+  using supported_referent_types = TypeList<Block, DataObject, ProxyBlock>;
 
   /// \brief Visits the symbol's referent, if one is present, by concrete
   /// referent type.
@@ -182,18 +188,20 @@ public:
   ///
   /// \code
   /// struct Visitor {
-  ///   int operator()(Block*) { return 0; }
+  ///   int operator()(CfgNode*) { return 0; }
   ///   long operator()(DataObject*) { return 1; }
   /// };
   ///
   /// Context Ctx;
-  /// Symbol* SymB = Symbol::Create(Ctx, Addr(0), "", Block::Create(Ctx));
-  /// Symbol* SymD = Symbol::Create(Ctx, Addr(0), "", DataObject::Create(Ctx));
+  /// Symbol* SymB = Symbol::Create(Ctx, Block::Create(Ctx), "");
+  /// Symbol* SymD = Symbol::Create(Ctx, DataObject::Create(Ctx), "");
+  /// Symbol* SymX = Symbol::Create(Ctx, Addr(42), "");
   /// Symbol* SymN = Symbol::Create(Ctx);
   ///
-  /// SymB->visit(Visitor{}); // Will call Visitor::operator()(Block*);
+  /// SymB->visit(Visitor{}); // Will call Visitor::operator()(CfgNode*);
   /// SymD->visit(Visitor{}); // Will call Visitor::operator()(DataObject*);
-  /// SymN->visit(Visitor{}); // Will not call either overload
+  /// SymX->visit(Visitor{}); // Will not call any overload
+  /// SymN->visit(Visitor{}); // Will not call any overload
   /// \endcode
   template <typename Callable> auto visit(Callable&& Visitor) const {
     return visit_impl(std::forward<Callable>(Visitor),
@@ -217,7 +225,7 @@ public:
   /// \param C  The Context in which this object will be held.
   ///
   /// \return The newly created object.
-  static Symbol* Create(Context& C) { return new (C) Symbol(C); }
+  static Symbol* Create(Context& C) { return C.Create<Symbol>(C); }
 
   /// \brief Create a Symbol object.
   ///
@@ -226,7 +234,7 @@ public:
   ///
   /// \return The newly created object.
   static Symbol* Create(Context& C, const std::string& Name) {
-    return new (C) Symbol(C, std::nullopt, Name);
+    return C.Create<Symbol>(C, Name);
   }
 
   /// \brief Create a Symbol object.
@@ -240,61 +248,60 @@ public:
   /// \return The newly created object.
   static Symbol* Create(Context& C, Addr X, const std::string& Name,
                         StorageKind Kind = StorageKind::Extern) {
-    return new (C) Symbol(C, X, Name, Kind);
+    return C.Create<Symbol>(C, X, Name, Kind);
   }
 
   /// \brief Create a Symbol object.
   ///
   /// \param C  The Context in which this object will be held.
-  /// \param X  The address of the symbol.
-  /// \param Name The name of the symbol.
   /// \param Referent The DataObject this symbol refers to.
+  /// \param Name The name of the symbol.
   /// \param Kind The storage kind the symbol has; defaults to
   /// StorageKind::Extern
   ///
   /// \return The newly created object.
   template <typename NodeTy>
-  static Symbol* Create(Context& C, Addr X, const std::string& Name,
-                        NodeTy* Referent,
+  static Symbol* Create(Context& C, NodeTy* Referent, const std::string& Name,
                         StorageKind Kind = StorageKind::Extern) {
     static_assert(is_supported_type<NodeTy>(), "unsupported referent type");
-    return new (C) Symbol(C, X, Name, Referent, Kind);
+    return C.Create<Symbol>(C, Referent, Name, Kind);
   }
 
   /// \brief Get the effective address.
   ///
   /// \return The effective address.
-  std::optional<Addr> getAddress() const { return Address; }
+  std::optional<Addr> getAddress() const {
+    return std::visit(
+        [](const auto& arg) {
+          using T = std::decay_t<decltype(arg)>;
+          if constexpr (std::is_same_v<T, std::monostate>)
+            return std::optional<Addr>{};
+          else if constexpr (std::is_same_v<T, Addr>)
+            return std::make_optional(arg);
+          else if constexpr (std::is_same_v<T, Node*>) {
+            if (Block* b = dyn_cast_or_null<Block>(arg))
+              return std::make_optional(b->getAddress());
+            else if (DataObject* d = dyn_cast_or_null<DataObject>(arg))
+              return std::make_optional(d->getAddress());
+            else if (ProxyBlock* p = dyn_cast_or_null<ProxyBlock>(arg))
+              return std::optional<Addr>{};
+            else
+              assert(arg == nullptr && "unsupported referent type");
+            return std::optional<Addr>{};
+          } else {
+            static_assert(
+                // Assert condition must depend on T, but will always be false.
+                std::bool_constant<!std::is_same_v<T, T>>::value,
+                "unsupported symbol payload type");
+          }
+        },
+        Payload);
+  }
 
   /// \brief Get the name.
   ///
   /// \return The name.
   const std::string& getName() const { return Name; }
-
-  /// \brief Set the DataObject to which this symbol refers.
-  ///
-  /// \tparam NodeTy  A Node type of a supported referent; should be
-  /// automatically deduced.
-  ///
-  /// \param N The Node to refer to.
-  ///
-  /// \return void
-  template <typename NodeTy>
-  void setReferent(NodeTy* N,
-                   std::enable_if_t<is_supported_type<NodeTy>()>* = nullptr) {
-    Referent = N;
-  }
-
-  /// \brief Deleted overload used to prevent setting a referent of an
-  /// unsupported type.
-  ///
-  /// \tparam NodeTy  An arbitrary type; should be automatically deduced.
-  ///
-  /// \return void
-  template <typename NodeTy>
-  void setReferent(NodeTy*,
-                   std::enable_if_t<!is_supported_type<NodeTy>(), NodeTy>* =
-                       nullptr) = delete;
 
   /// \brief Get the referent to which this symbol refers.
   ///
@@ -303,7 +310,9 @@ public:
   /// \return The data, dynamically typed as the given \p NodeTy, or
   /// null if there is no referent of that type.
   template <typename NodeTy> NodeTy* getReferent() {
-    return dyn_cast_or_null<NodeTy>(Referent);
+    if (Node* const* Ptr = std::get_if<Node*>(&Payload))
+      return dyn_cast_or_null<NodeTy>(*Ptr);
+    return nullptr;
   }
 
   /// \brief Get the referent to which this symbol refers.
@@ -313,8 +322,15 @@ public:
   /// \return The data, dynamically typed as the given \p NodeTy, or
   /// null if there is no referent of that type.
   template <typename NodeTy> const NodeTy* getReferent() const {
-    return dyn_cast_or_null<NodeTy>(Referent);
+    if (Node* const* Ptr = std::get_if<Node*>(&Payload))
+      return dyn_cast_or_null<NodeTy>(*Ptr);
+    return nullptr;
   }
+
+  /// \brief Check if this symbol has a referent.
+  ///
+  /// \return \p true if the symbol has a referent, \p false otherwise.
+  bool hasReferent() const { return std::holds_alternative<Node*>(Payload); }
 
   /// \brief Set the storage kind.
   ///
@@ -328,6 +344,7 @@ public:
   /// \return The storage kind.
   Symbol::StorageKind getStorageKind() const { return Storage; }
 
+  /// @cond INTERNAL
   /// \brief The protobuf message type used for serializing Symbol.
   using MessageType = proto::Symbol;
 
@@ -346,23 +363,34 @@ public:
   /// \return The deserialized Symbol object, or null on failure.
   static Symbol* fromProtobuf(Context& C, const MessageType& Message);
 
-  /// \cond INTERNAL
   static bool classof(const Node* N) { return N->getKind() == Kind::Symbol; }
-  /// \endcond
+  /// @endcond
 
 private:
   Symbol(Context& C) : Node(C, Kind::Symbol) {}
-  Symbol(Context& C, std::optional<Addr> X, const std::string& N,
+  Symbol(Context& C, const std::string& N, StorageKind SK = StorageKind::Extern)
+      : Node(C, Kind::Symbol), Payload(), Name(N), Storage(SK) {}
+  Symbol(Context& C, Addr X, const std::string& N,
          StorageKind SK = StorageKind::Extern)
-      : Node(C, Kind::Symbol), Address(X), Name(N), Storage(SK) {}
-  Symbol(Context& C, Addr X, const std::string& N, Node* R,
+      : Node(C, Kind::Symbol), Payload(X), Name(N), Storage(SK) {}
+  template <typename NodeTy>
+  Symbol(Context& C, NodeTy* R, const std::string& N,
          StorageKind SK = StorageKind::Extern)
-      : Node(C, Kind::Symbol), Address(X), Name(N), Storage(SK), Referent(R) {}
+      : Node(C, Kind::Symbol), Payload(R), Name(N), Storage(SK) {}
 
-  std::optional<Addr> Address;
+  std::variant<std::monostate, Addr, Node*> Payload;
   std::string Name;
   Symbol::StorageKind Storage{StorageKind::Extern};
-  Node* Referent{nullptr};
+
+  friend class Context; // Allow Context to construct Symbols.
+
+  // Allow these methods to update Symbol contents.
+  friend void renameSymbol(Module& M, Symbol& S, const std::string& N);
+  friend void setSymbolAddress(Module& M, Symbol& S, Addr A);
+
+  template <typename NodeTy>
+  friend std::enable_if_t<Symbol::is_supported_type<NodeTy>()>
+  setReferent(Module& M, Symbol& S, NodeTy* N);
 };
 } // namespace gtirb
 

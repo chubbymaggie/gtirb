@@ -131,6 +131,12 @@ void addElement(std::map<T, U>* Container,
                 typename std::map<T, U>::value_type&& Element) {
   Container->insert(std::move(Element));
 }
+template <typename T, typename ContainerType>
+std::enable_if_t<std::is_destructible_v<
+    decltype(std::declval<ContainerType>().insert(std::declval<T>()))*>>
+addElement(ContainerType& Container, T&& Element) {
+  Container.insert(std::move(Element));
+}
 
 // Convert the contents of a Container into protobuf messages.
 template <typename ContainerT, typename MessageT>
@@ -139,6 +145,12 @@ void containerToProtobuf(const ContainerT& Values, MessageT* Message) {
   std::for_each(Values.begin(), Values.end(), [Message](const auto& N) {
     addElement(Message, toProtobuf(deref_if_ptr(N)));
   });
+}
+
+template <typename IterT, typename MessageT>
+void sequenceToProtobuf(IterT First, IterT Last, MessageT* Message) {
+  while (First != Last)
+    addElement(Message, toProtobuf(deref_if_ptr(*First++)));
 }
 
 // Generic conversion from protobuf for IR classes which implement fromProtobuf;

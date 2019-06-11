@@ -22,7 +22,6 @@
 #include <array>
 #include <boost/endian/conversion.hpp>
 #include <boost/range/iterator_range.hpp>
-#include <gsl/gsl>
 #include <optional>
 #include <set>
 #include <type_traits>
@@ -52,22 +51,7 @@ public:
   /// \param C  The Context in which this object will be held.
   ///
   /// \return The newly created object.
-  static ImageByteMap* Create(Context& C) { return new (C) ImageByteMap(C); }
-
-  /// \brief Set the file name of the image.
-  ///
-  /// This is for informational purposes only and will not be used to open
-  /// the image, so it does not need to be the path of an existing file.
-  ///
-  /// \param X The file name to use.
-  ///
-  /// \return void
-  void setFileName(const std::string& X) { FileName = X; }
-
-  /// \brief Get the loaded file name and path.
-  ///
-  /// \return The file name and path.
-  const std::string& getFileName() const { return FileName; }
+  static ImageByteMap* Create(Context& C) { return C.Create<ImageByteMap>(C); }
 
   /// \brief Set the base address of the loaded file.
   ///
@@ -113,20 +97,6 @@ public:
   /// addresses.
   std::pair<Addr, Addr> getAddrMinMax() const { return EaMinMax; }
 
-  /// \brief Mark the loaded image as having been relocated.
-  ///
-  /// \return void
-  ///
-  /// This is primarily useful for loaders that load from sources that provide
-  /// already-relocated content.
-  void setIsRelocated() { IsRelocated = true; }
-
-  /// \brief Check: has the loaded image been relocated?
-  ///
-  /// \return \c true if the loaded image has been relocated, \c false
-  /// otherwise.
-  bool getIsRelocated() const { return IsRelocated; }
-
   /// \brief Set the byte order to use when getting or setting data.
   ///
   /// \param Value The byte order to use.
@@ -155,7 +125,15 @@ public:
   ///
   /// \sa gtirb::ByteMap
   /// \sa getAddrMinMax()
-  bool setData(Addr A, gsl::span<const std::byte> Data);
+  template <class It, typename = std::enable_if_t<std::is_convertible_v<
+                          decltype(*std::declval<It>()), std::byte>>>
+  bool setData(Addr A, boost::iterator_range<It> Data) {
+    if (A >= this->EaMinMax.first &&
+        (A + Data.size() - 1) <= this->EaMinMax.second) {
+      return this->BMap.setData(A, Data);
+    }
+    return false;
+  }
 
   /// \brief Set the byte map in the specified range to a constant value.
   ///
@@ -195,12 +173,8 @@ public:
   /// \sa getAddrMinMax()
   template <typename T> bool setData(Addr A, const T& Data) {
     static_assert(std::is_pod<T>::value, "T must be a POD type");
-    if (this->ByteOrder != boost::endian::order::native) {
-      T reversed = boost::endian::conditional_reverse(
-          Data, this->ByteOrder, boost::endian::order::native);
-      return this->BMap.setData(A, as_bytes(gsl::make_span(&reversed, 1)));
-    }
-    return this->BMap.setData(A, as_bytes(gsl::make_span(&Data, 1)));
+    std::array<T, 1> wrapper = {Data};
+    return setData(A, wrapper);
   }
 
   /// \brief Store an array to the byte map at the specified address,
@@ -229,12 +203,47 @@ public:
     if (this->BMap.willOverlapRegion(A, Size * sizeof(T)))
       return false;
 
-    for (const auto& Elt : Data) {
-      [[maybe_unused]] bool V = this->setData(A, Elt);
-      assert(V && "setting an individual data element failed unexpectedly");
-      A = A + sizeof(T);
+    if (this->ByteOrder != boost::endian::order::native) {
+      std::array<T, Size> reversed;
+      std::transform(Data.begin(), Data.end(), reversed.begin(),
+                     [this](const T& x) -> T {
+                       return boost::endian::conditional_reverse(
+                           x, this->ByteOrder, boost::endian::order::native);
+                     });
+      auto begin = reinterpret_cast<const std::byte*>(&reversed);
+      auto end = reinterpret_cast<const std::byte*>(&reversed + 1);
+      return this->BMap.setData(A, boost::make_iterator_range(begin, end));
     }
-    return true;
+    auto begin = reinterpret_cast<const std::byte*>(&Data);
+    auto end = reinterpret_cast<const std::byte*>(&Data + 1);
+    return this->BMap.setData(A, boost::make_iterator_range(begin, end));
+  }
+
+  /// \brief Store an array of std::byte to the byte map at the specified
+  /// address.
+  ///
+  /// \param A        The address at which to store the data. Must be greater
+  ///                 than the minimum address for \c this.
+  /// \param Data     \p A + sizeof(\p Data) must be less than the
+  ///                 maximum address for \c this.
+  ///
+  ///
+  /// \tparam N       The size of the array.
+  ///
+  /// \return  Will return \c true if the data can be assigned at the given
+  /// Address, or \c false otherwise. The data passed in at the given address
+  /// cannot overlap another memory region (overlays are not supported).
+  ///
+  /// \sa gtirb::ByteMap
+  /// \sa getByteOrder()
+  /// \sa getAddrMinMax()
+  template <size_t Size>
+  bool setData(Addr A, const std::array<std::byte, Size>& Data) {
+    if (this->BMap.willOverlapRegion(A, Size * sizeof(Data)))
+      return false;
+
+    return this->BMap.setData(
+        A, boost::make_iterator_range(Data.begin(), Data.end()));
   }
 
   /// \brief A constant range of bytes, representing a contiguous block of
@@ -274,8 +283,9 @@ public:
 
     T Data;
     if (this->getDataNoSwap(A, Data)) {
-      return boost::endian::conditional_reverse(Data, this->ByteOrder,
-                                                boost::endian::order::native);
+      boost::endian::conditional_reverse_inplace(Data, this->ByteOrder,
+                                                 boost::endian::order::native);
+      return Data;
     }
     return std::nullopt;
   }
@@ -311,6 +321,28 @@ public:
     return std::nullopt;
   }
 
+  /// \brief Get an array of std::byte from the byte map at the specified
+  /// address.
+  ///
+  /// \param  A       The starting address for the data.
+  ///
+  /// \tparam N        The size of the array to be returned.
+  ///
+  /// \return If there is data available of the appropriate size at the given
+  /// address, this returns an object of type \p T, initialized from the byte
+  /// map data. Otherwise, it returns nullopt.
+  ///
+  /// \sa gtirb::ByteMap
+  template <size_t Size>
+  std::optional<std::array<std::byte, Size>> getData(Addr A) {
+    std::array<std::byte, Size> Result;
+    if (getDataNoSwap(A, Result)) {
+      return Result;
+    }
+    return std::nullopt;
+  }
+
+  /// @cond INTERNAL
   /// \brief The protobuf message type used for serializing ImageByteMap.
   using MessageType = proto::ImageByteMap;
 
@@ -329,30 +361,26 @@ public:
   /// \return The deserialized ImageByteMap object, or null on failure.
   static ImageByteMap* fromProtobuf(Context& C, const MessageType& Message);
 
-  /// \cond INTERNAL
   static bool classof(const Node* N) {
     return N->getKind() == Kind::ImageByteMap;
   }
-  /// \endcond
+  /// @endcond
 
 private:
   template <typename T> bool getDataNoSwap(Addr A, T& Result) {
-    auto DestSpan = as_writeable_bytes(gsl::make_span(&Result, 1));
-    // Assign this to a variable so it isn't destroyed before we copy
-    // from it (because gsl::span is non-owning).
-    const_range Data = this->data(A, DestSpan.size_bytes());
-    std::copy(Data.begin(), Data.end(), DestSpan.begin());
+    const_range Data = this->data(A, sizeof(T));
+    std::copy(Data.begin(), Data.end(), reinterpret_cast<std::byte*>(&Result));
     return Data.begin() != Data.end();
   }
 
   // Storage for the entire contents of the loaded image.
   gtirb::ByteMap BMap;
-  std::string FileName;
   std::pair<Addr, Addr> EaMinMax;
   Addr BaseAddress;
   Addr EntryPointAddress;
-  bool IsRelocated{false};
   boost::endian::order ByteOrder{boost::endian::order::native};
+
+  friend class Context;
 };
 
 /// \relates ImageByteMap

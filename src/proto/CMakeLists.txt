@@ -7,6 +7,7 @@ if(${CMAKE_CXX_COMPILER_ID} STREQUAL MSVC)
     add_compile_options("/FIgtirb/Export.hpp")
 else()
     add_compile_options(-Wno-shadow)
+    add_compile_options(-Wno-unused-parameter)
     add_compile_options(-include "${CMAKE_SOURCE_DIR}/include/gtirb/Export.hpp")
 endif()
 PROTOBUF_GENERATE_CPP(ProtoSources ProtoHeaders
@@ -14,9 +15,14 @@ PROTOBUF_GENERATE_CPP(ProtoSources ProtoHeaders
                       ${ProtoFiles})
 
 add_library(proto STATIC ${ProtoSources} ${ProtoHeaders})
+
+if(${PROTOBUF_INTERNAL})
+  add_dependencies(proto Protobuf)
+endif()
+
 target_link_libraries(proto ${Boost_LIBRARIES} ${PROTOBUF_LIBRARY})
 target_compile_definitions(proto PRIVATE GTIRB_${PROJECT_NAME}_EXPORTS)
-include_directories(SYSTEM "${Protobuf_INCLUDE_DIRS}")
+include_directories(SYSTEM "${PROTOBUF_INCLUDE_DIRS}")
 
 add_custom_command(TARGET proto POST_BUILD
     COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_BINARY_DIR}/include/proto")

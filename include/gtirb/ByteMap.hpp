@@ -21,7 +21,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
-#include <gsl/gsl>
 #include <limits>
 #include <map>
 #include <vector>
@@ -54,7 +53,70 @@ public:
   /// \return  Will return \c true if the data can be assigned at the given
   /// Address, or \c false otherwise. The data passed in at the given address
   /// cannot overlap another memory region (overlays are not supported).
-  bool setData(Addr A, gsl::span<const std::byte> Data);
+  template <class It, typename = std::enable_if_t<std::is_convertible_v<
+                          decltype(*std::declval<It>()), std::byte>>>
+  bool setData(Addr A, boost::iterator_range<It> Data) {
+    // Look for a region to hold this data. If necessary, extend or merge
+    // existing regions to keep allocations contiguous.
+    auto data_size = std::distance(Data.begin(), Data.end());
+    Addr Limit = A + data_size;
+    for (size_t i = 0; i < Regions.size(); i++) {
+      auto& Current = Regions[i];
+
+      // Overwrite data in existing region
+      if (containsAddr(Current, A) && Limit <= addressLimit(Current)) {
+        auto Offset = A - Current.Address;
+        std::copy(Data.begin(), Data.end(), Current.Data.begin() + Offset);
+        return true;
+      }
+
+      // Extend region
+      if (A == addressLimit(Current)) {
+        bool HasNext = i + 1 < Regions.size();
+        if (HasNext && Limit > Regions[i + 1].Address) {
+          return false;
+        }
+
+        Current.Data.reserve(Current.Data.size() + data_size);
+        std::copy(Data.begin(), Data.end(), std::back_inserter(Current.Data));
+        // Merge with subsequent region
+        if (HasNext && Limit == Regions[i + 1].Address) {
+          const auto& D = Regions[i + 1].Data;
+          Current.Data.reserve(Current.Data.size() + D.size());
+          std::copy(D.begin(), D.end(), std::back_inserter(Current.Data));
+          this->Regions.erase(this->Regions.begin() + i + 1);
+        }
+        return true;
+      }
+
+      // Extend region backward
+      if (Limit == Current.Address) {
+        // Note: this is probably O(N^2), moving existing data on each inserted
+        // element.
+        std::copy(Data.begin(), Data.end(),
+                  std::inserter(Current.Data, Current.Data.begin()));
+        Current.Address = A;
+        return true;
+      }
+
+      if (containsAddr(Current, A) || containsAddr(Current, Limit - 1)) {
+        return false;
+      }
+    }
+
+    // Not contiguous with any existing data. Create a new region.
+    Region R = {A, std::vector<std::byte>()};
+    R.Data.reserve(data_size);
+    std::copy(Data.begin(), Data.end(), std::back_inserter(R.Data));
+    this->Regions.insert(
+        std::lower_bound(this->Regions.begin(), this->Regions.end(), R,
+                         [](const auto& Left, const auto& Right) {
+                           return Left.Address < Right.Address;
+                         }),
+        std::move(R));
+
+    return true;
+  }
 
   /// \brief A constant range of bytes.
   using const_range =
@@ -68,8 +130,13 @@ public:
   /// \return An iterator range that encodes a contiguous block of memory that
   /// can be accessed directly, such as via memcpy(). Will return an empty
   /// range if the requested address or number of bytes cannot be retrieved.
+  ///
+  /// For an interator over the contents of a \ref Block, use
+  /// Block::getAddress() and Block::getSize() to obtain the arguments
+  /// to this method.
   const_range data(Addr A, size_t Bytes) const;
 
+  /// @cond INTERNAL
   /// \brief The protobuf message type used for serializing ByteMap.
   using MessageType = proto::ByteMap;
 
@@ -88,7 +155,6 @@ public:
   /// \return The deserialized ByteMap object, or null on failure.
   void fromProtobuf(Context& C, const MessageType& Message);
 
-  /// \cond INTERNAL
   struct Region {
     Addr Address;
     std::vector<std::byte> Data;
@@ -97,7 +163,7 @@ public:
 
     uint64_t getSize() const { return this->Data.size(); }
   };
-  /// \endcond
+  /// @endcond
 
 private:
   std::vector<Region> Regions;

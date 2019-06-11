@@ -5,7 +5,9 @@
 # Need 3.9 to support CXX_STANDARD=17 and protobuf
 CMAKE_MINIMUM_REQUIRED(VERSION 3.9.0)
 
-PROJECT(GT-IRB)
+PROJECT(GTIRB)
+set(GTIRB_VERSION "0.1.1" CACHE STRING "version of gtirb" FORCE)
+
 
 include(CheckFunctionExists)
 include(CheckCXXSourceCompiles)
@@ -22,6 +24,7 @@ option(GTIRB_ENABLE_TESTS "Enable building and running unit tests." ON)
 # This just sets the builtin BUILD_SHARED_LIBS, but if defaults to ON
 # instead of OFF.
 option(GTIRB_BUILD_SHARED_LIBS "Build shared libraries." ON)
+option(GTIRB_USE_SYSTEM_BOOST "Use system-wide installation of Boost." ON)
 if(GTIRB_BUILD_SHARED_LIBS)
   set(BUILD_SHARED_LIBS ON)
 else()
@@ -50,6 +53,22 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Handle version initialization
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/version.txt" ver)
+
+string(REGEX MATCH "VERSION_MAJOR ([0-9]*)" _ ${ver})
+set(GTIRB_MAJOR_VERSION ${CMAKE_MATCH_1})
+
+string(REGEX MATCH "VERSION_MINOR ([0-9]*)" _ ${ver})
+set(GTIRB_MINOR_VERSION ${CMAKE_MATCH_1})
+
+string(REGEX MATCH "VERSION_PATCH ([0-9]*)" _ ${ver})
+set(GTIRB_PATCH_VERSION ${CMAKE_MATCH_1})
+
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/include/gtirb/version.h.in"
+  "${CMAKE_CURRENT_SOURCE_DIR}/include/gtirb/version.h"
+  @ONLY)
+
 # Use C++17
 set(CMAKE_CXX_STANDARD 17)
 # Error if it's not available
@@ -66,14 +85,12 @@ endif()
 
 set(CMAKE_CXX_VISIBILITY_PRESET hidden)
 
-# Base include path for the GT-IRB library.
+# Base include path for the GTIRB library.
 include_directories(${CMAKE_SOURCE_DIR}/include)
 #
 # Global Options (Compile / Link)
 #
-
-add_compile_options(-DBOOST_CONFIG_SUPPRESS_OUTDATED_MESSAGE)
-
+add_compile_options(-DBOOST_MULTI_INDEX_DISABLE_SERIALIZATION)
 if(${CMAKE_CXX_COMPILER_ID} STREQUAL MSVC)
         add_compile_options(-D_CRT_SECURE_NO_WARNINGS)
         add_compile_options(-D_MBCS)
@@ -134,6 +151,15 @@ if(${CMAKE_CXX_COMPILER_ID} STREQUAL MSVC)
 
         # Microsoft VCPKG
         set(CMAKE_TOOLCHAIN_FILE "C:/vcpkg/scripts/buildsystems/vcpkg.cmake" CACHE PATH "")
+        if(NOT EXISTS ${CMAKE_TOOLCHAIN_FILE})
+                message(ERROR
+  " Specified CMAKE_TOOLCHAIN_FILE does not exist.\n\n"
+  " - If vcpkg is not installed, install it now from\n"
+  "   https://github.com/Microsoft/vcpkg\n"
+  " - If vcpkg is installed but not at the path shown below, \n"
+  "   invoke cmake with argument -DCMAKE_TOOLCHAIN_FILE=<path/to/vcpkg.cmake>\n")
+                message(FATAL_ERROR "Specified CMAKE_TOOLCHAIN_FILE ${CMAKE_TOOLCHAIN_FILE} does not exist.")
+        endif()
     include(${CMAKE_TOOLCHAIN_FILE})
 elseif((${CMAKE_CXX_COMPILER_ID} STREQUAL GNU)
        OR (${CMAKE_CXX_COMPILER_ID} STREQUAL Clang))
@@ -145,36 +171,22 @@ endif()
 # Boost
 # ---------------------------------------------------------------------------
 
-include_directories(SYSTEM "${CMAKE_SOURCE_DIR}/boost/include")
-file(COPY "${CMAKE_SOURCE_DIR}/boost/include/boost"
-  DESTINATION "${CMAKE_BINARY_DIR}/include/")
+find_package(Boost 1.67)
+add_compile_options(-DBOOST_CONFIG_SUPPRESS_OUTDATED_MESSAGE)
+add_compile_options(-DBOOST_SYSTEM_NO_DEPRECATED)
 
-# ---------------------------------------------------------------------------
-# Microsoft GSL 
-# ---------------------------------------------------------------------------
-configure_file(CMakeLists.gsl gsl-download/CMakeLists.txt)
+# Use system-wide installation of Boost if it exists, to reduce the
+# chance of problems due to mismatched versions. If Boost is not
+# found, fall back to the partial copy bundled with gtirb.
+if(GTIRB_USE_SYSTEM_BOOST AND Boost_FOUND)
+  include_directories(SYSTEM ${Boost_INCLUDE_DIRS})
+else()
+  include_directories(SYSTEM "${CMAKE_SOURCE_DIR}/boost/include")
+  file(COPY "${CMAKE_SOURCE_DIR}/boost/include/boost"
+    DESTINATION "${CMAKE_BINARY_DIR}/include/")
+  install(DIRECTORY "${CMAKE_SOURCE_DIR}/boost/include/boost" DESTINATION include)
 
-execute_process(COMMAND "${CMAKE_COMMAND}" -G "${CMAKE_GENERATOR}" . 
-        RESULT_VARIABLE result
-        WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/gsl-download" )
-
-if(result)
-        message(WARNING "CMake step for gsl failed: ${result}")
 endif()
-
-execute_process(COMMAND "${CMAKE_COMMAND}" --build .
-        RESULT_VARIABLE result
-        WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/gsl-download" )
-
-if(result)
-        message(WARNING "Build step for gsl failed: ${result}")
-endif()
-
-add_subdirectory("${CMAKE_BINARY_DIR}/gsl-src"
-                                 "${CMAKE_BINARY_DIR}/gsl-build"
-                                 EXCLUDE_FROM_ALL)
-
-include_directories("${CMAKE_BINARY_DIR}/gsl-src/include")
 
 # ---------------------------------------------------------------------------
 # Google Test Application
@@ -218,11 +230,83 @@ endif()
 # ---------------------------------------------------------------------------
 # protobuf
 # ---------------------------------------------------------------------------
-find_package(Protobuf REQUIRED)
+# Internal function: find threads library
+function(_protobuf_find_threads)
+  set(CMAKE_THREAD_PREFER_PTHREAD TRUE)
+  find_package(Threads)
+  if(Threads_FOUND)
+    list(APPEND PROTOBUF_LIBRARIES ${CMAKE_THREAD_LIBS_INIT})
+	set(PROTOBUF_LIBRARIES "${PROTOBUF_LIBRARIES}" PARENT_SCOPE)
+  endif()
+endfunction()
+   
+find_package(Protobuf QUIET)
+  
+if(NOT ${Protobuf_FOUND})
+  if(WIN32)
+    set(MSG_PROTOBUF_INSTALL
+      " - If protobuf is not installed, install it now: \n"
+      "       vcpkg.exe install --triplet x86-windows protobuf \n"
+      "   or\n"
+      "       vcpkg.exe install --triplet x64-windows protobuf \n\n" )
+    
+    message(ERROR
+      " No protobuf (Google Protocol Buffers) installation found.\n"
+      ${MSG_PROTOBUF_INSTALL}
+      " - If protobuf is installed, make sure the installation location is in your PATH.\n")
+    message(FATAL_ERROR "No protobuf (Google Protocol Buffers) installation found.\n")
+  else()  
+	#Attempt to configure/build protobuf locally.  
+    configure_file(CMakeLists.protobuf Protobuf/CMakeLists.txt)
+    
+	# Initialize CMake files required to build/install protobuf.
+    execute_process(COMMAND "${CMAKE_COMMAND}" -G "${CMAKE_GENERATOR}" . 
+      RESULT_VARIABLE result
+      WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/Protobuf"
+      )
+    
+    if(result)
+      message(WARNING "CMake step for protobuf failed: ${result}")
+    endif()
+    
+	set(PROTOBUF_INSTALL_DIR "${CMAKE_BINARY_DIR}/protobuf-src")
+	set(PROTOBUF_INCLUDE_DIRS "${CMAKE_BINARY_DIR}/protobuf-src/include") 
+    
+    add_subdirectory("${CMAKE_BINARY_DIR}/Protobuf/"
+      "${PROTOBUF_INSTALL_DIR}"
+      EXCLUDE_FROM_ALL)
+    
+    if(BUILD_SHARED_LIBS)
+      set(PROTOBUF_LIBRARY "${PROTOBUF_INSTALL_DIR}/lib/libprotobuf.so")
+    else()
+      set(PROTOBUF_LIBRARY "${PROTOBUF_INSTALL_DIR}/lib/libprotobuf.la")
+    endif()
+    
+	
+	# PROTOBUF_GENERATE_CPP in src/proto/CMakeLists.txt
+    #  needs the correct location of the `protoc` binary.
+    set(Protobuf_PROTOC_EXECUTABLE "${PROTOBUF_INSTALL_DIR}/bin/protoc")
+    add_executable(protobuf::protoc IMPORTED)
+    
+	set_target_properties(protobuf::protoc PROPERTIES
+	  IMPORTED_LOCATION "${Protobuf_PROTOC_EXECUTABLE}")
+            
+	# Set PROTOBUF_LIBRARIES
+	unset(PROTOBUF_LIBRARIES CACHE)
+	set(PROTOBUF_LIBRARIES "${PROTOBUF_LIBRARY}")
+	_protobuf_find_threads()
+    set(PROTOBUF_INTERNAL TRUE)
+  endif()
+else()
+  set(PROTOBUF_INTERNAL FALSE)
+endif()
+
+
 if(NOT BUILD_SHARED_LIBS)
   set(Protobuf_USE_STATIC_LIBS ON)
 endif()
 include_directories(SYSTEM ${PROTOBUF_INCLUDE_DIRS})
+
 
 # ---------------------------------------------------------------------------
 # gtirb sources
@@ -234,6 +318,11 @@ add_subdirectory(doc/examples)
 # ---------------------------------------------------------------------------
 # Export config for use by other CMake projects
 # ---------------------------------------------------------------------------
+
+# --- For direct use from the build directory/cmake registry ---
+# This exports the targets
+export(TARGETS gtirb proto FILE "${CMAKE_CURRENT_BINARY_DIR}/gtirbTargets.cmake")
+# This is the main config file that find_package will look for.
 file(
   WRITE "${CMAKE_CURRENT_BINARY_DIR}/gtirbConfig.cmake"
         "
@@ -243,8 +332,28 @@ file(
                 APPEND PROPERTY
                     INTERFACE_INCLUDE_DIRECTORIES \"${CMAKE_BINARY_DIR}/include\" ${PROTOBUF_INCLUDE_DIRS}
             )
-        "
-    )
-
-export(TARGETS gtirb proto FILE "${CMAKE_CURRENT_BINARY_DIR}/gtirbTargets.cmake")
+        ")
+# Add the build directory to the user CMake registry, so find_package
+# can locate it automatically.
 export(PACKAGE gtirb)
+
+
+# --- For the installed copy ---
+# Main config file for find_package, just includes the targets file.
+file(
+  WRITE "${CMAKE_CURRENT_BINARY_DIR}/export/gtirbConfig.cmake"
+        "include(\"\$\{CMAKE_CURRENT_LIST_DIR\}/gtirbTargets.cmake\")"
+    )
+# In this mode, find_package also seems to require a version file
+set(version_file "${CMAKE_CURRENT_BINARY_DIR}/gtirbConfig-version.cmake")
+write_basic_package_version_file(${version_file}
+                                 VERSION ${GTIRB_VERSION}
+                                 COMPATIBILITY AnyNewerVersion)
+
+# Copy the config files to the install location
+install(FILES
+  ${CMAKE_CURRENT_BINARY_DIR}/export/gtirbConfig.cmake
+  ${version_file}
+  DESTINATION lib/gtirb)
+# This exports the targets to the install location.
+install(EXPORT gtirbTargets DESTINATION lib/gtirb)

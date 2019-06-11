@@ -25,14 +25,18 @@ TEST(Unit_AuxData, eaMapProtobufRoundTrip) {
   using MapT = std::map<Addr, std::string>;
   AuxData Original = MapT({{Addr(1), {"a"}}, {Addr(2), {"b"}}});
 
-  gtirb::AuxData Result;
+  gtirb::AuxData Result, Intermediate;
   auto Message = toProtobuf(Original);
+  fromProtobuf(Ctx, Intermediate, Message);
+  // Test that deserialized data can be reserialized again.
+  Message = toProtobuf(Intermediate);
   fromProtobuf(Ctx, Result, Message);
 
-  MapT M = *Result.get<MapT>();
-  EXPECT_EQ(M.size(), 2);
-  EXPECT_EQ(M[Addr(1)], "a");
-  EXPECT_EQ(M[Addr(2)], "b");
+  MapT* M = Result.get<MapT>();
+  EXPECT_TRUE(M);
+  EXPECT_EQ(M->size(), 2);
+  EXPECT_EQ(M->at(Addr(1)), "a");
+  EXPECT_EQ(M->at(Addr(2)), "b");
 }
 
 TEST(Unit_AuxData, intMapProtobufRoundTrip) {
@@ -137,7 +141,19 @@ TEST(Unit_AuxData, uuidVectorProtobufRoundTrip) {
             std::vector<UUID>({Id1, Id2, Id3}));
 }
 
-TEST(Unit_AuxData, typeName) {
+TEST(Unit_AuxData, uuidSetProtobufRoundTrip) {
+  UUID Id1 = Node::Create(Ctx)->getUUID(), Id2 = Node::Create(Ctx)->getUUID(),
+       Id3 = Node::Create(Ctx)->getUUID();
+  AuxData Original = std::set<UUID>({Id1, Id2, Id3});
+
+  gtirb::AuxData Result;
+  auto Message = toProtobuf(Original);
+  fromProtobuf(Ctx, Result, Message);
+
+  EXPECT_EQ(*Result.get<std::set<UUID>>(), std::set<UUID>({Id1, Id2, Id3}));
+}
+
+TEST(Unit_AuxData, typeNameImpl) {
   EXPECT_EQ(AuxDataTemplate<uint64_t>().typeName(), "uint64_t");
   EXPECT_EQ(AuxDataTemplate<std::vector<uint64_t>>().typeName(),
             "sequence<uint64_t>");
@@ -152,6 +168,15 @@ TEST(Unit_AuxData, typeName) {
 
   X = AuxDataTemplate<std::vector<std::tuple<int64_t, uint64_t>>>().typeName();
   EXPECT_EQ(X, "sequence<tuple<int64_t,uint64_t>>");
+
+  X = AuxDataTemplate<std::set<int32_t>>().typeName();
+  EXPECT_EQ(X, "set<int32_t>");
+}
+
+TEST(Unit_AuxData, typeName) {
+  EXPECT_EQ(AuxData().typeName(), std::string());
+  EXPECT_EQ(AuxData(std::vector<int64_t>{1, 2, 3}).typeName(),
+            "sequence<int64_t>");
 }
 
 TEST(Unit_AuxData, getPrimitiveTypes) {
@@ -205,6 +230,14 @@ TEST(Unit_AuxData, getMap) {
   AuxData P(Orig);
 
   auto& Result = *P.get<std::map<char, int64_t>>();
+  EXPECT_EQ(Result, Orig);
+}
+
+TEST(Unit_AuxData, getSet) {
+  std::set<int> Orig({1, 2, 3});
+  AuxData P(Orig);
+
+  auto& Result = *P.get<std::set<int>>();
   EXPECT_EQ(Result, Orig);
 }
 
@@ -391,13 +424,14 @@ TEST(Unit_AuxData, nestedProtobufRoundTrip) {
 
 TEST(Unit_AuxData, wrongTypeAfterProtobufRoundTrip) {
   AuxData Original;
-  Original = 1234;
+  Original = static_cast<int32_t>(1234);
 
   auto Message = toProtobuf(Original);
   AuxData Result;
   fromProtobuf(Ctx, Result, Message);
 
   EXPECT_EQ(Result.get<std::string>(), nullptr);
+  EXPECT_EQ(Result.typeName(), "int32_t");
 }
 
 struct MoveTest {

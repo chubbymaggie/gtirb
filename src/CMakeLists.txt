@@ -36,11 +36,13 @@ include_directories("${CMAKE_BINARY_DIR}/src/")
 set(PUBLIC_HEADERS
         ${CMAKE_SOURCE_DIR}/include/gtirb/Allocator.hpp
         ${CMAKE_SOURCE_DIR}/include/gtirb/AuxData.hpp
+        ${CMAKE_SOURCE_DIR}/include/gtirb/AuxDataContainer.hpp
         ${CMAKE_SOURCE_DIR}/include/gtirb/Block.hpp
         ${CMAKE_SOURCE_DIR}/include/gtirb/ByteMap.hpp
         ${CMAKE_SOURCE_DIR}/include/gtirb/Casting.hpp
         ${CMAKE_SOURCE_DIR}/include/gtirb/Context.hpp
         ${CMAKE_SOURCE_DIR}/include/gtirb/CFG.hpp
+        ${CMAKE_SOURCE_DIR}/include/gtirb/CfgNode.hpp
         ${CMAKE_SOURCE_DIR}/include/gtirb/DataObject.hpp
         ${CMAKE_SOURCE_DIR}/include/gtirb/Addr.hpp
         ${CMAKE_SOURCE_DIR}/include/gtirb/Export.hpp
@@ -48,10 +50,12 @@ set(PUBLIC_HEADERS
         ${CMAKE_SOURCE_DIR}/include/gtirb/IR.hpp
         ${CMAKE_SOURCE_DIR}/include/gtirb/Module.hpp
         ${CMAKE_SOURCE_DIR}/include/gtirb/Node.hpp
+        ${CMAKE_SOURCE_DIR}/include/gtirb/ProxyBlock.hpp
         ${CMAKE_SOURCE_DIR}/include/gtirb/Section.hpp
         ${CMAKE_SOURCE_DIR}/include/gtirb/Symbol.hpp
         ${CMAKE_SOURCE_DIR}/include/gtirb/SymbolicExpression.hpp
         ${CMAKE_SOURCE_DIR}/include/gtirb/gtirb.hpp
+        ${CMAKE_SOURCE_DIR}/include/gtirb/version.h
         )
 
 set(${PROJECT_NAME}_H
@@ -61,6 +65,7 @@ set(${PROJECT_NAME}_H
 
 set(${PROJECT_NAME}_SRC
         AuxData.cpp
+        AuxDataContainer.cpp
         Block.cpp
         ByteMap.cpp
         Context.cpp
@@ -70,6 +75,7 @@ set(${PROJECT_NAME}_SRC
         IR.cpp
         Module.cpp
         Node.cpp
+        ProxyBlock.cpp
         Section.cpp
         Serialization.cpp
         Symbol.cpp
@@ -88,6 +94,10 @@ endif()
 
 GTIRB_ADD_LIBRARY()
 
+if(${PROTOBUF_INTERNAL})
+  add_dependencies(${PROJECT_NAME} Protobuf)
+endif()
+
 target_link_libraries(
   ${PROJECT_NAME}
   PUBLIC
@@ -99,9 +109,6 @@ target_link_libraries(
   PRIVATE
   proto)
 target_compile_definitions(${PROJECT_NAME} PRIVATE GTIRB_${PROJECT_NAME}_EXPORTS)
-# Force GSL to use std::byte instead of its own byte type.
-# This should be auto-detected but it doesn't seem to work reliably.
-target_compile_definitions(${PROJECT_NAME} PUBLIC GSL_USE_STD_BYTE)
 
 # Copy gtirb headers into build directory
 add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
@@ -124,3 +131,10 @@ endif()
 if(GTIRB_ENABLE_TESTS)
         add_subdirectory(test)
 endif()
+
+install(TARGETS ${PROJECT_NAME} EXPORT gtirbTargets
+  INCLUDES DESTINATION include
+  RUNTIME DESTINATION bin
+  LIBRARY DESTINATION lib)
+install(FILES ${PUBLIC_HEADERS} DESTINATION include/gtirb)
+install(DIRECTORY "${CMAKE_BINARY_DIR}/include/proto" DESTINATION include)

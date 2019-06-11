@@ -49,7 +49,7 @@ public:
   /// be held.
   ///
   /// \return The newly created DataObject.
-  static DataObject* Create(Context& C) { return new (C) DataObject(C); }
+  static DataObject* Create(Context& C) { return C.Create<DataObject>(C); }
 
   /// \brief Create a DataObject object.
   ///
@@ -62,7 +62,7 @@ public:
   ///
   /// \return The newly created DataObject.
   static DataObject* Create(Context& C, Addr Address, uint64_t Size) {
-    return new (C) DataObject(C, Address, Size);
+    return C.Create<DataObject>(C, Address, Size);
   }
 
   /// \brief Get the address of a DataObject.
@@ -77,6 +77,7 @@ public:
   ///
   uint64_t getSize() const { return Size; }
 
+  /// @cond INTERNAL
   /// \brief The protobuf message type used for serializing DataObject.
   using MessageType = proto::DataObject;
 
@@ -95,15 +96,16 @@ public:
   /// \return The deserialized DataObject object, or null on failure.
   static DataObject* fromProtobuf(Context& C, const MessageType& Message);
 
-  /// \cond INTERNAL
   static bool classof(const Node* N) {
     return N->getKind() == Kind::DataObject;
   }
-  /// \endcond
+  /// @endcond
 
 private:
   Addr Address{0};
   uint64_t Size{0};
+
+  friend class Context;
 };
 } // namespace gtirb
 

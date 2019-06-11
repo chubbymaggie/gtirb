@@ -13,9 +13,11 @@
 //
 //===----------------------------------------------------------------------===//
 #include <gtirb/Block.hpp>
+#include <gtirb/CfgNode.hpp>
 #include <gtirb/Context.hpp>
 #include <gtirb/DataObject.hpp>
 #include <gtirb/Module.hpp>
+#include <gtirb/ProxyBlock.hpp>
 #include <gtirb/Symbol.hpp>
 #include <proto/Symbol.pb.h>
 #include <gtest/gtest.h>
@@ -37,20 +39,35 @@ TEST(Unit_Symbol, setStorageKind) {
 }
 
 TEST(Unit_Symbol, setReferent) {
-  Symbol* Sym = Symbol::Create(Ctx);
+  Module* Mod = Module::Create(Ctx);
+  Symbol* Sym = emplaceSymbol(*Mod, Ctx);
   DataObject* Data = DataObject::Create(Ctx);
-  Block* B = Block::Create(Ctx, 0, Addr(1), 2);
+  Mod->addData(Data);
+  Block* B = emplaceBlock(*Mod, Ctx, Addr(1), 2);
+  ProxyBlock* Proxy = ProxyBlock::Create(Ctx);
+  Mod->addProxyBlock(Proxy);
 
   // Symbol should have no referent yet.
   EXPECT_EQ(Sym->getReferent<Node>(), nullptr);
+  EXPECT_FALSE(Sym->getAddress());
 
-  Sym->setReferent(Data);
-  EXPECT_EQ(Sym->getReferent<DataObject>(), Data);
+  setReferent(*Mod, *Sym, Data);
   EXPECT_EQ(Sym->getReferent<Block>(), nullptr);
+  EXPECT_EQ(Sym->getReferent<DataObject>(), Data);
+  EXPECT_EQ(Sym->getReferent<ProxyBlock>(), nullptr);
+  EXPECT_EQ(Sym->getAddress(), Addr(0));
 
-  Sym->setReferent(B);
+  setReferent(*Mod, *Sym, B);
   EXPECT_EQ(Sym->getReferent<Block>(), B);
   EXPECT_EQ(Sym->getReferent<DataObject>(), nullptr);
+  EXPECT_EQ(Sym->getReferent<ProxyBlock>(), nullptr);
+  EXPECT_EQ(Sym->getAddress(), Addr(1));
+
+  setReferent(*Mod, *Sym, Proxy);
+  EXPECT_EQ(Sym->getReferent<Block>(), nullptr);
+  EXPECT_EQ(Sym->getReferent<DataObject>(), nullptr);
+  EXPECT_EQ(Sym->getReferent<ProxyBlock>(), Proxy);
+  EXPECT_FALSE(Sym->getAddress());
 }
 
 TEST(Unit_Symbol, protobufRoundTrip) {
@@ -58,14 +75,16 @@ TEST(Unit_Symbol, protobufRoundTrip) {
   proto::DataObject DOMessage;
   UUID DataUUID;
 
+  // Symbol with referent
   {
     Context InnerCtx;
-    Symbol* Original = Symbol::Create(InnerCtx, Addr(1), "test");
+    Module* Mod = Module::Create(Ctx);
+    Symbol* Original = emplaceSymbol(*Mod, InnerCtx, "test");
     Original->setStorageKind(Symbol::StorageKind::Static);
 
-    DataObject* Data = DataObject::Create(InnerCtx);
+    DataObject* Data = DataObject::Create(InnerCtx, Addr(1), 1);
     DataUUID = Data->getUUID();
-    Original->setReferent(Data);
+    setReferent(*Mod, *Original, Data);
 
     Original->toProtobuf(&SMessage);
 
@@ -83,6 +102,20 @@ TEST(Unit_Symbol, protobufRoundTrip) {
   EXPECT_EQ(Result->getReferent<DataObject>()->getUUID(), DataUUID);
   EXPECT_EQ(Result->getReferent<Block>(), nullptr);
 
+  // Symbol with address
+  {
+    Context InnerCtx;
+    Symbol* Original = Symbol::Create(InnerCtx, Addr(2), "test");
+    Original->toProtobuf(&SMessage);
+  }
+  Result = Symbol::fromProtobuf(Ctx, SMessage);
+
+  EXPECT_EQ(Result->getAddress(), Addr(2));
+  EXPECT_EQ(Result->getName(), "test");
+  EXPECT_EQ(Result->getStorageKind(), Symbol::StorageKind::Extern);
+  EXPECT_EQ(Result->getReferent<DataObject>(), nullptr);
+  EXPECT_EQ(Result->getReferent<Block>(), nullptr);
+
   // Symbol without address
   {
     Context InnerCtx;
@@ -95,9 +128,8 @@ TEST(Unit_Symbol, protobufRoundTrip) {
 }
 
 TEST(Unit_Symbol, visitation) {
-  Symbol* Sym =
-      Symbol::Create(Ctx, Addr(1), "test", Block::Create(Ctx, 0, Addr(1), 2));
-  Symbol* NoRef = Symbol::Create(Ctx);
+  Symbol* Sym = Symbol::Create(Ctx, Block::Create(Ctx, Addr(1), 2), "test");
+  Symbol* NoRef = Symbol::Create(Ctx, Addr(1), "test2");
 
   struct Visitor {
     int operator()(Block* B) {
@@ -110,13 +142,18 @@ TEST(Unit_Symbol, visitation) {
       EXPECT_TRUE(false);
       return 1;
     }
+    long operator()(ProxyBlock*) {
+      // This overload should never be called.
+      EXPECT_TRUE(false);
+      return 1;
+    }
   };
   EXPECT_EQ(0, *Sym->visit(Visitor{}));
 
   // The version that has no referent should not call any of the visitor
   // functions and the returned optional should not have a value.
   struct NoRefVisitor {
-    int operator()(const Block*) const {
+    int operator()(const CfgNode*) const {
       EXPECT_TRUE(false);
       return 0;
     }
@@ -129,7 +166,7 @@ TEST(Unit_Symbol, visitation) {
 
   // Similar to the test above, but ensuring we can visit without a return type.
   struct ConstVoidVisitor {
-    void operator()(const Block* B) const { EXPECT_NE(B, nullptr); }
+    void operator()(const CfgNode* N) const { EXPECT_NE(N, nullptr); }
     void operator()(const DataObject*) const { EXPECT_TRUE(false); }
   };
   Sym->visit(ConstVoidVisitor{});

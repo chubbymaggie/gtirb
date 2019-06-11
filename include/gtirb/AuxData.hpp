@@ -1,6 +1,6 @@
 //===- AuxData.hpp ---------------------------------------------*- C++-*-===//
 //
-//  Copyright (C) 2018 GrammaTech, Inc.
+//  Copyright (C) 2018-2019 GrammaTech, Inc.
 //
 //  This code is licensed under the MIT license. See the LICENSE file in the
 //  project root for license terms.
@@ -19,6 +19,7 @@
 #include <gtirb/Block.hpp>
 #include <gtirb/Node.hpp>
 #include <boost/endian/conversion.hpp>
+#include <deque>
 #include <list>
 #include <map>
 #include <string>
@@ -40,8 +41,8 @@ namespace gtirb {
 class Context;
 
 /// \defgroup AUXDATA_GROUP AuxData
-/// \brief \ref AuxData objects can be attached to the \ref IR to store
-/// additional client-specific data in a portable way.
+/// \brief \ref AuxData objects can be attached to the \ref IR or individual
+/// \ref Modules to store additional client-specific data in a portable way.
 ///
 /// AuxData can store the following types:
 ///   - all integral types
@@ -65,6 +66,12 @@ class Context;
 /// types will not be accessible to other clients which are not compiled with
 /// support for those types. It is preferable to store data using the basic
 /// types whenever possible, in order to maximize interoperability.
+///
+///
+/// ### 'Sanctioned' AuxData Tables
+///
+/// We specify a small number of standard AuxData table schemate to
+/// support interoperability. For details, see \ref md_AuxData.
 ///
 /// ### Serialization Format
 ///
@@ -91,6 +98,7 @@ template <class T> struct is_sequence : std::false_type {};
 /// @cond INTERNAL
 template <class T> struct is_sequence<std::vector<T>> : std::true_type {};
 template <class T> struct is_sequence<std::list<T>> : std::true_type {};
+template <class T> struct is_sequence<std::deque<T>> : std::true_type {};
 /// @endcond
 
 /// \struct is_mapping
@@ -102,9 +110,14 @@ template <class T> struct is_mapping : std::false_type {};
 /// @cond INTERNAL
 template <class T, class U>
 struct is_mapping<std::map<T, U>> : std::true_type {};
-// Explicitly disable multimap since its semantics are different.
+template <class T, class U>
+struct is_mapping<std::unordered_map<T, U>> : std::true_type {};
+// Explicitly disable multimaps. Because they can contain multiple values for
+// a given key, they can't be used interchangeably with maps.
 template <class T, class U>
 struct is_mapping<std::multimap<T, U>> : std::false_type {};
+template <class T, class U>
+struct is_mapping<std::unordered_multimap<T, U>> : std::false_type {};
 
 template <class T> struct is_tuple : std::false_type {};
 template <class... Args>
@@ -153,14 +166,16 @@ template <class T> struct default_serialization {
     // Store as little-endian.
     T reversed = boost::endian::conditional_reverse<
         boost::endian::order::little, boost::endian::order::native>(object);
-    auto srcBytes = as_bytes(gsl::make_span(&reversed, 1));
-    std::transform(srcBytes.begin(), srcBytes.end(), It,
+    auto srcBytes_begin = reinterpret_cast<std::byte*>(&reversed);
+    auto srcBytes_end = reinterpret_cast<std::byte*>(&reversed + 1);
+    std::transform(srcBytes_begin, srcBytes_end, It,
                    [](auto b) { return char(b); });
   }
 
   static from_iterator fromBytes(T& object, from_iterator It) {
-    auto dest = as_writeable_bytes(gsl::make_span(&object, 1));
-    std::for_each(dest.begin(), dest.end(), [&It](auto& b) {
+    auto dest_begin = reinterpret_cast<std::byte*>(&object);
+    auto dest_end = reinterpret_cast<std::byte*>(&object + 1);
+    std::for_each(dest_begin, dest_end, [&It](auto& b) {
       b = std::byte(*It);
       ++It;
     });
@@ -212,7 +227,7 @@ template <> struct auxdata_traits<std::string> {
   }
 
   static from_iterator fromBytes(std::string& Object, from_iterator It) {
-    size_t Count;
+    uint64_t Count;
     It = auxdata_traits<uint64_t>::fromBytes(Count, It);
 
     Object.resize(Count);
@@ -253,13 +268,40 @@ struct auxdata_traits<T, typename std::enable_if_t<is_sequence<T>::value>> {
   }
 
   static from_iterator fromBytes(T& Object, from_iterator It) {
-    size_t Count;
+    uint64_t Count;
     It = auxdata_traits<uint64_t>::fromBytes(Count, It);
 
     Object.resize(Count);
     std::for_each(Object.begin(), Object.end(), [&It](auto& Elt) {
       It = auxdata_traits<typename T::value_type>::fromBytes(Elt, It);
     });
+
+    return It;
+  }
+};
+
+template <class... Args> struct auxdata_traits<std::set<Args...>> {
+  using T = std::set<Args...>;
+
+  static std::string type_id() {
+    return "set<" + TypeId<typename T::value_type>::value() + ">";
+  }
+
+  static void toBytes(const T& Object, to_iterator It) {
+    auxdata_traits<uint64_t>::toBytes(Object.size(), It);
+    for (const auto& Elt : Object)
+      auxdata_traits<typename T::value_type>::toBytes(Elt, It);
+  }
+
+  static from_iterator fromBytes(T& Object, from_iterator It) {
+    uint64_t Count;
+    It = auxdata_traits<uint64_t>::fromBytes(Count, It);
+
+    for (uint64_t i = 0; i < Count; i++) {
+      typename T::value_type V;
+      It = auxdata_traits<decltype(V)>::fromBytes(V, It);
+      Object.emplace(std::move(V));
+    }
 
     return It;
   }
@@ -281,10 +323,10 @@ struct auxdata_traits<T, typename std::enable_if_t<is_mapping<T>::value>> {
   }
 
   static from_iterator fromBytes(T& Object, from_iterator It) {
-    size_t Count;
+    uint64_t Count;
     It = auxdata_traits<uint64_t>::fromBytes(Count, It);
 
-    for (size_t i = 0; i < Count; i++) {
+    for (uint64_t i = 0; i < Count; i++) {
       typename T::key_type K;
       It = auxdata_traits<decltype(K)>::fromBytes(K, It);
       typename T::mapped_type V;
@@ -420,13 +462,15 @@ public:
   //
   template <typename T> T* get() {
     if (!this->RawBytes.empty()) {
-      // Reconstruct from deserialized data
-      this->Impl = std::make_unique<AuxDataTemplate<T>>();
+      // Reconstruct from deserialized data, but wait to update the impl until
+      // after checking that the types match.
+      auto TempImpl = std::make_unique<AuxDataTemplate<T>>();
 
-      if (this->Impl->typeName() != this->TypeName) {
+      if (TempImpl->typeName() != this->TypeName) {
         return nullptr;
       }
 
+      this->Impl = std::move(TempImpl);
       this->Impl->fromBytes(this->RawBytes);
       this->RawBytes.clear();
       this->TypeName.clear();
@@ -437,6 +481,18 @@ public:
     return static_cast<T*>(this->Impl->get());
   }
 
+  /// \brief A string representation of the type of the stored data.
+  ///
+  /// \returns The type name, or an empty string if no value is stored.
+  std::string typeName() const {
+    if (this->Impl) {
+      return this->Impl->typeName();
+    } else {
+      return this->TypeName;
+    }
+  }
+
+  /// @cond INTERNAL
   /// \brief Initialize an AuxData from a protobuf message.
   ///
   /// \param <unnamed>   Not used.
@@ -451,7 +507,7 @@ public:
   ///
   /// \return A protobuf message representing the AuxData.
   GTIRB_EXPORT_API friend proto::AuxData toProtobuf(const AuxData&);
-
+  /// @endcond
 private:
   std::unique_ptr<AuxDataImpl> Impl;
   std::string RawBytes;

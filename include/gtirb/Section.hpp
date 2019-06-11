@@ -45,7 +45,7 @@ public:
   /// \param C  The Context in which this object will be held.
   ///
   /// \return The newly created object.
-  static Section* Create(Context& C) { return new (C) Section(C); }
+  static Section* Create(Context& C) { return C.Create<Section>(C); }
 
   /// \brief Create a Section object.
   ///
@@ -57,7 +57,7 @@ public:
   /// \return The newly created object.
   static Section* Create(Context& C, const std::string& Name, Addr Address,
                          uint64_t Size) {
-    return new (C) Section(C, Name, Address, Size);
+    return C.Create<Section>(C, Name, Address, Size);
   }
 
   /// \brief Equality operator overload.
@@ -81,6 +81,7 @@ public:
   /// \return The size.
   uint64_t getSize() const { return Size; }
 
+  /// @cond INTERNAL
   /// \brief The protobuf message type used for serializing Section.
   using MessageType = proto::Section;
 
@@ -99,14 +100,15 @@ public:
   /// \return The deserialized Section object, or null on failure.
   static Section* fromProtobuf(Context& C, const MessageType& Message);
 
-  /// \cond INTERNAL
   static bool classof(const Node* N) { return N->getKind() == Kind::Section; }
-  /// \endcond
+  /// @endcond
 
 private:
   std::string Name;
   Addr Address{0};
   uint64_t Size{0};
+
+  friend class Context;
 };
 } // namespace gtirb
 

@@ -19,18 +19,30 @@
 #include <gtirb/ImageByteMap.hpp>
 #include <gtirb/SymbolicExpression.hpp>
 #include <proto/Module.pb.h>
-#include <gsl/gsl>
 #include <map>
 
 using namespace gtirb;
 
 Module::Module(Context& C)
-    : Node(C, Kind::Module), ImageBytes(ImageByteMap::Create(C)) {}
+    : AuxDataContainer(C, Kind::Module), ImageBytes(ImageByteMap::Create(C)) {}
+
+Module::Module(Context& C, const std::string& X)
+    : AuxDataContainer(C, Kind::Module), Name(X),
+      ImageBytes(ImageByteMap::Create(C)) {}
 
 gtirb::ImageByteMap& Module::getImageByteMap() { return *this->ImageBytes; }
 
 const gtirb::ImageByteMap& Module::getImageByteMap() const {
   return *this->ImageBytes;
+}
+
+void Module::addCfgNode(CfgNode* N) {
+  if (Block* B = dyn_cast<Block>(N))
+    addBlock(B);
+  else if (ProxyBlock* P = dyn_cast<ProxyBlock>(N))
+    addProxyBlock(P);
+  else
+    assert("attempted to add invalid CfgNode");
 }
 
 void Module::toProtobuf(MessageType* Message) const {
@@ -43,17 +55,15 @@ void Module::toProtobuf(MessageType* Message) const {
   Message->set_name(this->Name);
   this->ImageBytes->toProtobuf(Message->mutable_image_byte_map());
   *Message->mutable_cfg() = gtirb::toProtobuf(this->Cfg);
-  containerToProtobuf(this->Data, Message->mutable_data());
-  containerToProtobuf(this->Sections, Message->mutable_sections());
-  containerToProtobuf(this->SymbolicOperands,
-                      Message->mutable_symbolic_operands());
-
-  // Special case for symbol set: serialized as a repeated field, uses
-  // multiple indices internally.
-  auto M = Message->mutable_symbols();
-  initContainer(M, this->Symbols.size());
-  std::for_each(this->Symbols.begin(), this->Symbols.end(),
-                [M](const auto& N) { N.second->toProtobuf(M->Add()); });
+  sequenceToProtobuf(block_begin(), block_end(), Message->mutable_blocks());
+  sequenceToProtobuf(data_begin(), data_end(), Message->mutable_data());
+  sequenceToProtobuf(ProxyBlocks.begin(), ProxyBlocks.end(),
+                     Message->mutable_proxies());
+  sequenceToProtobuf(section_begin(), section_end(),
+                     Message->mutable_sections());
+  containerToProtobuf(Symbols, Message->mutable_symbols());
+  containerToProtobuf(SymbolicOperands, Message->mutable_symbolic_operands());
+  AuxDataContainer::toProtobuf(Message->mutable_aux_data_container());
 }
 
 // FIXME: improve containerFromProtobuf so it can handle a pair where one
@@ -80,20 +90,19 @@ Module* Module::fromProtobuf(Context& C, const MessageType& Message) {
   M->IsaID = static_cast<ISAID>(Message.isa_id());
   M->Name = Message.name();
   M->ImageBytes = ImageByteMap::fromProtobuf(C, Message.image_byte_map());
+  for (const auto& Elt : Message.blocks())
+    M->addBlock(Block::fromProtobuf(C, Elt));
+  for (const auto& Elt : Message.data())
+    M->addData(DataObject::fromProtobuf(C, Elt));
+  for (const auto& Elt : Message.proxies())
+    M->addProxyBlock(ProxyBlock::fromProtobuf(C, Elt));
+  for (const auto& Elt : Message.sections())
+    M->addSection(Section::fromProtobuf(C, Elt));
+  containerFromProtobuf(C, M->Symbols, Message.symbols());
   gtirb::fromProtobuf(C, M->Cfg, Message.cfg());
-  nodeMapFromProtobuf(C, M->Data, Message.data());
-  nodeMapFromProtobuf(C, M->Sections, Message.sections());
-
-  // Special case for symbol set: serialized as a repeated field, uses
-  // multiple indices internally.
-  M->Symbols.clear();
-  const auto& Syms = Message.symbols();
-  std::for_each(Syms.begin(), Syms.end(), [M, &C](const auto& Elt) {
-    M->addSymbol(Symbol::fromProtobuf(C, Elt));
-  });
-
   // Create SymbolicExpressions after the Symbols they reference.
   containerFromProtobuf(C, M->SymbolicOperands, Message.symbolic_operands());
-
+  AuxDataContainer::fromProtobuf(static_cast<AuxDataContainer*>(M), C,
+                                 Message.aux_data_container());
   return M;
 }

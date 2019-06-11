@@ -18,7 +18,6 @@
 #include <gtirb/Casting.hpp>
 #include <gtirb/Context.hpp>
 #include <gtirb/Export.hpp>
-#include <gsl/gsl>
 #include <string>
 
 /// \file Node.hpp
@@ -39,15 +38,24 @@ class Node;
 class GTIRB_EXPORT_API Node {
 public:
   /// \cond internal
+
+  // The enum constants below must be grouped according to the inheritance
+  // hierarchy such that all descendants of a type X must appear between the
+  // constant for X and LAST_X. This allows us to quickly check whether a type
+  // is a descendant of X by checking if the enum constant falls in that range.
   enum class Kind {
     Node,
+    CfgNode,
     Block,
+    ProxyBlock,
+    LAST_CfgNode = ProxyBlock, // Mark last descendant of CfgNode
     DataObject,
     ImageByteMap,
     IR,
     Module,
     Section,
     Symbol,
+    LAST_Node = Symbol, // Mark last descendant of Node
   };
   /// \endcond
 
@@ -58,12 +66,19 @@ public:
     return C.findNode(Uuid);
   }
 
+  /// \brief Retrieve a node by its UUID.
+  ///
+  /// \return The Node with the given UUID, or nullptr if none exists.
+  static const Node* getByUUID(const Context& C, const UUID& Uuid) {
+    return C.findNode(Uuid);
+  }
+
   /// \brief Create a Node object in its default state.
   ///
   /// \param C  The Context in which this object will be held.
   ///
   /// \return The newly created object.
-  static Node* Create(Context& C) { return new (C) Node(C, Kind::Node); }
+  static Node* Create(Context& C) { return C.Create<Node>(C, Kind::Node); }
 
   /// \brief Cleans up resources no longer needed by the Node object.
   ~Node() noexcept;
@@ -78,7 +93,10 @@ public:
   /// \endcond
 
   /// \cond INTERNAL
-  static bool classof(const Node* N) { return N->getKind() == Kind::Node; }
+  static bool classof(const Node* N) { return classofKind(N->getKind()); }
+  static bool classofKind(Kind K) {
+    return K >= Kind::Node && K <= Kind::LAST_Node;
+  }
   /// \endcond
 
 protected:
@@ -93,13 +111,15 @@ private:
   // constructor by reference. However, we don't want to store a reference to
   // the Context object because we want to keep the Node class copyable and
   // Context needs to own a move-only allocator.
-  gsl::not_null<Context*> Ctx;
+  Context* Ctx;
 
   // Assign a new UUID to this node. This is only needed when deserializing
   // objects, as there are no constructors allowing the user to set the UUID on
   // construction.
   void setUUID(UUID X);
   friend void setNodeUUIDFromBytes(Node* Node, const std::string& Bytes);
+
+  friend class Context;
 };
 
 } // namespace gtirb

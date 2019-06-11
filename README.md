@@ -9,59 +9,79 @@ GTIRB is modeled on LLVM-IR, and seeks to serve a similar
 functionality of encouraging communication and interoperability
 between tools.
 
-The remainder of this file has information on GTIRB's:
+The remainder of this file describes various aspects of GTIRB:
 - [Structure](#structure)
 - [Building](#building)
 - [Usage](#usage)
 
+
 ## Structure
+
 GTIRB has the following structure:
 
-      Aux Data
-      /
-    IR        -----Data---Bytes
-      \      /-----Symbols
+        -------Aux Data
+       /    /
+      /    /   ----DataObject
+    IR    /   /----Section
+      \  /   /-----Symbols
       Modules------SymbolicExpressions
              \-----ImageByteMap
-              -----ICFG
-                   /  \
-              Blocks  Edges
-                 |
-            Instructions---Bytes
+              -----CFG
+                   / \
+               Edges Blocks
+
 
 ### IR
-An instance of GTIRB may include multiple `module`s which represent
-loadable objects such as executables or libraries.  Each `module`
-holds information such as `symbol`s, `data`, and an inter-procedural
-control flow graph (`ICFG`).  The `ICFG` consists of basic `block`s
-and control flow edges between these `block`s.  Each `block` holds
-some number of `instruction`s.  Each `datum` and `instruction` holds
-both a pointer to a range of bytes in the `ImageByteMap` and
-`symbolic` information coverage that range.
+
+An instance of GTIRB may include multiple modules (`Module`) which
+represent loadable objects such as executables or libraries.  Each
+module holds information such as symbols (`Symbol`), data (`DataObject`),
+and an inter-procedural control flow graph (`CFG`).  The CFG
+consists of basic blocks (`Block`) and control flow edges between
+these blocks.  Each datum and each block holds a range refering to the
+bytes in the `ImageByteMap`. Each symbol holds a pointer to the block
+or datum it references.
+
 
 ### Instructions
 
-GTIRB explicitly does NOT represent instructions but does provide
-symbolic operand information and access to the bytes.  There are many
-options for representation of single instructions (e.g.,
+GTIRB explicitly does NOT represent instructions or instruction
+semantics but does provide symbolic operand information and access to
+the bytes.  There are many *intermediate language*s (IL)s for
+representation of instruction semantics (e.g.,
 [BAP](https://github.com/BinaryAnalysisPlatform/bap)'s
 [BIL](https://github.com/BinaryAnalysisPlatform/bil/releases/download/v0.1/bil.pdf),
-or [Angr](http://angr.io)'s [Vex](https://github.com/angr/pyvex)).
-Instruction bytes may easily be decoded/encoded using the popular
+[Angr](http://angr.io)'s [Vex](https://github.com/angr/pyvex), or
+[Ghidra](https://www.nsa.gov/resources/everyone/ghidra/)'s P-code).
+GTIRB works with these or any other IL by storing instructions
+generally and efficiently as *raw machine-code bytes* and separately
+storing the symbolic and control flow information.  The popular
 [Capstone](https://www.capstone-engine.org)/[Keystone](https://www.keystone-engine.org)
-disassembler/assembler.
+decoder/encoder provide an excellent option to read and write
+instructions from/to GTIRB's machine-code byte representation without
+committing to any particular semantic IL.  By supporting multiple ILs
+and separate storage of analysis results in auxiliary data tables
+GTIRB enables collaboration between independent binary analysis and
+rewriting teams and tools.
+
 
 ### Auxiliary Data
 
-Additional arbitrary information, e.g. analysis results, may be added
-to GTIRB in the form of `AuxData` object.  These can store maps and
-vectors of basic GTIRB types in a portable way. This repository will
-describe the anticipated structure for very common auxiliary data.
+GTIRB provides for the sharing of additional information,
+e.g. analysis results, in the form of `AuxData` objects.  These can
+store maps and vectors of basic GTIRB types in a portable way. This
+repository will describe the anticipated structure for very common
+types of auxiliary data such as function boundary information, type
+information, or results of common analyses.
+
 
 ### UUIDs
+
 Every element of GTIRB (namely: modules (`Module`), symbols
-(`Symbol`), globals, blocks (`Block`), and instructions
-(`InstructionRef`) has a unique associated ID.
+(`Symbol`), blocks (`Block`), and instructions (`InstructionRef`) has
+a universally unique identifier (UUID).  UUIDs allow both first-class
+IR components and AuxData tables to reference elements of the IR.
+
 
 ## Building
 
@@ -69,30 +89,96 @@ GTIRB should successfully build in 64-bits with GCC, Clang, and Visual
 Studio compilers supporting at least C++17.  GTIRB uses CMake which
 must be installed.
 
+The common build process looks like this:
 ```sh
 mkdir build
 cd build
+# Note: You may need to add some -D arguments to the next command. See below.
 cmake ../path/to/gtirb
-make -j
+cmake --build .
 # Run the test suite.
 ./bin/TestGTIRB
 ```
 
+The gtirb library will be located under `build/lib`.
+
+### Requirements
+
+The GTIRB build process attempts to automatically download all external
+requirements during build.  However to *install* GTIRB, the following
+requirements should be installed separately.
+
+- Protobuf versions 3.1
+  (or later once we disable warnings in the protobuf build)
+- Boost version 1.67.0 or later.
+
+### Building on Windows
+
+CMake uses a toolchain file, as generated by
+[Microsoft's vcpkg](https://github.com/Microsoft/vcpkg) to find your compiler
+toolchain and protobuf library on Windows. By default, GTIRB looks in
+C:\vcpkg\scripts\buildsystems\vcpkg.cmake, but a different path can be specified
+by passing
+
+    -DCMAKE_TOOLCHAIN_FILE="C:\path\to\vcpkg\scripts\buildsystems\vcpkg.cmake"
+
+when executing the CMake command above.
+
+The GTIRB build process currently does not download Protobuf automatically on
+Windows. Instead, you should install it with `vcpkg`. Please note that
+GTIRB is not compatible with protobuf version 3.7.x. Please make sure that you
+have a Protobuf version between 3.1.x and 3.6.1.
+
 ## Usage
 
 GTIRB is designed to be serialized using [Google's protocol
-Buffers](https://developers.google.com/protocol-buffers/) (i.e.,
-[protobuf](https://github.com/google/protobuf/wiki)) and eventually
-JSON through protobuf's JSON output, enabling easy use from any
-programming language.  GTIRB may also be used as a C++ library
+buffers](https://developers.google.com/protocol-buffers/) (i.e.,
+[protobuf](https://github.com/google/protobuf/wiki)), enabling [easy
+and efficient use from any programming language](#using-serialized-gtirb-data).
+
+GTIRB may also be [used as a C++ library](#using-the-c++-api)
 implementing an efficient data structure suitable for use by binary
 analysis and rewriting applications.
 
-This repository defines the GTIRB data structure and C++ library.
+- [Using Serialized GTIRB Data](#using-serialized-gtirb-data)
+- [Using the C++ Library](#using-the-c++-library)
 
-### Populating the IR
+### Using Serialized GTIRB Data
 
-GT-IRB objects are created within a `Context` object. Freeing the
+The serialized [protobuf](https://github.com/google/protobuf/wiki)
+data produced by GTIRB allows for exploration and manipulation in the
+language of your choice. The [Google protocol
+buffers](https://developers.google.com/protocol-buffers/) homepage
+lists the languages in which protocol buffers can be used directly;
+users of other languages can convert the protobuf-formatted data to
+JSON format and then use the JSON data in their applications. In the
+future we intend to define a standard JSON schema for GTIRB.
+
+Directory `gtirb/src/proto` contains the protocol buffer message type
+definitions for GTIRB. You can inspect these `.proto` files to
+determine the structure of the various GTIRB message types. The
+top-level message type is `IR`.
+
+For more details, see [Using Serialized GTIRB Data](PROTOBUF.md)
+
+
+### Using the C++ Library
+
+We have provided several C++ examples in directory
+`gtirb/doc/examples`. See the [Examples tab](examples.html) for more
+information.
+
+The remainder of this section provides examples walking through common
+tasks using the GTIRB C++ library API.
+
+- [Populating the IR](#populating-the-ir)
+- [Querying the IR](#querying-the-ir)
+- [Serialization](#serialization)
+
+
+#### Populating the IR
+
+GTIRB objects are created within a `Context` object. Freeing the
 `Context` will also destroy all the objects within it.
 
 ```c++
@@ -141,24 +227,24 @@ byteMap.setData(Addr(2608), bytes);
 ```
 
 Symbols associate a name with an object in the `IR`, such as a
-`DataObject` or `Block`. They can optionally store an address as well.
+`DataObject` or `Block`. They can optionally store an address instead.
 
 ```c++
 auto data = module.data();
 module.addSymbol(Symbol::Create(C,
-                                Addr(2608), // address
-                                "data1",    // name
                                 data1,      // referent
+                                "data1",    // name
                                 Symbol::StorageKind::Extern));
-module.addSymbol(Symbol::Create(C, Addr(2614), "data2", data2,
+module.addSymbol(Symbol::Create(C, data2, "data2",
                                 Symbol::StorageKind::Extern));
 ```
 
-GTIRB can store multiple symbols with the same address.
+GTIRB can store multiple symbols with the same address or referent.
 
 ```c++
-module.addSymbol(Symbol::Create(C, Addr(2614), "duplicate", data2,
+module.addSymbol(Symbol::Create(C, data2, "duplicate",
                                 Symbol::StorageKind::Local));
+module.addSymbol(Symbol::Create(C, Addr(2608), "alias"))
 ```
 
 
@@ -204,7 +290,9 @@ ir.addAuxData("stringMap", std::map<std::string, std::string>(
                              {{"a", "str1"}, {"b", "str2"}}));
 ```
 
-### Querying the IR
+
+#### Querying the IR
+
 Symbols can be looked up by address or name.  Any number of symbols
 can share an address or name, so be prepared to deal with multiple
 results.
@@ -229,6 +317,16 @@ DataObject* referent = sym1.getReferent<DataObject>();
 assert(referent);
 assert(referent->getAddress() == Addr(2614));
 assert(referent->getSize() == 2);
+```
+
+Alternatively, DataObjects can be looked up by an address contained
+within the object. Any number of objects may overlap and contain an
+address, so be prepared to deal with multiple results.
+
+```c++
+auto objs = module.findData(Addr(2610));
+assert(objs.size() == 1);
+assert(objs.begin()->getAddress() == Addr(2608));
 ```
 
 The CFG uses
@@ -284,7 +382,7 @@ for (auto p : *stringMap) {
 }
 ```
 
-### Serialization
+#### Serialization
 
 Serialize IR to a file:
 

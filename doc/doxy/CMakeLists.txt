@@ -10,13 +10,28 @@ if(DOXYGEN_FOUND)
 set(DOC_INDIR "${CMAKE_CURRENT_SOURCE_DIR}/..")
 set(ROOTDIR "${CMAKE_CURRENT_SOURCE_DIR}/../..")
 
-configure_file("${CMAKE_CURRENT_SOURCE_DIR}/Doxyfile.in" "${CMAKE_CURRENT_BINARY_DIR}/Doxyfile" @ONLY)
-
 set(BUILDFILES_IN preprocmd.py DoxygenLayout.xml)
 foreach(_inf ${BUILDFILES_IN})
   configure_file(${CMAKE_CURRENT_SOURCE_DIR}/${_inf} ${CMAKE_CURRENT_BINARY_DIR}/${_inf} @ONLY)
 endforeach()
 
+# Handle version initialization
+file(READ "${ROOTDIR}/version.txt" ver)
+
+string(REGEX MATCH "VERSION_MAJOR ([0-9]*)" _ ${ver})
+set(GTIRB_MAJOR_VERSION ${CMAKE_MATCH_1})
+
+string(REGEX MATCH "VERSION_MINOR ([0-9]*)" _ ${ver})
+set(GTIRB_MINOR_VERSION ${CMAKE_MATCH_1})
+
+string(REGEX MATCH "VERSION_PATCH ([0-9]*)" _ ${ver})
+set(GTIRB_PATCH_VERSION ${CMAKE_MATCH_1})
+
+configure_file("${ROOTDIR}/include/gtirb/version.h.in"
+  "${ROOTDIR}/include/gtirb/version.h"
+  @ONLY)
+
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/Doxyfile.in" "${CMAKE_CURRENT_BINARY_DIR}/Doxyfile" @ONLY)
 
 # adapted from https://gist.github.com/abravalheri/11214134
 
@@ -52,7 +67,7 @@ add_custom_command(OUTPUT ${DOTFILES}
 # ----------------------------------------------------------------------
 
 
-set(MDFILES_IN "${DOC_INDIR}/CFG-Edges.md" "${ROOTDIR}/CONTRIBUTING.md" "${ROOTDIR}/README.md")
+set(MDFILES_IN "${DOC_INDIR}/CFG-Edges.md" "${ROOTDIR}/AuxData.md" "${ROOTDIR}/CONTRIBUTING.md" "${ROOTDIR}/FAQ.md" "${ROOTDIR}/PROTOBUF.md" "${ROOTDIR}/README.md")
 
 set(MDFILES ${MDFILES_IN})
 move_filename(MDFILES ${CMAKE_CURRENT_BINARY_DIR})
@@ -64,12 +79,12 @@ foreach(_inmd ${MDFILES_IN})
      WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
      DEPENDS ${_inmd}
      COMMAND ${CMAKE_COMMAND} -E copy ${_inmd} "${_outmd}.in"
-     COMMAND python2 preprocmd.py "${_outmd}.in" ${_outmd}
+     COMMAND python preprocmd.py "${_outmd}.in" ${_outmd}
      COMMENT "processing ${_outmd}"
      VERBATIM
 )
-endforeach() 
-   
+endforeach()
+
 
 #----------------------------------------------------------------------
 # Main target
